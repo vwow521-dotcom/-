@@ -1,5 +1,6 @@
 // Project context, progress, notes, questions and the panel's read model.
 import type { Doorbells } from "../doorbells/index.js";
+import type { Chat } from "./chat.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import type { Leases } from "./leases.js";
 import type { Meetings } from "./meetings.js";
@@ -15,6 +16,7 @@ export class Workspace {
     private readonly scheduler: Scheduler,
     private readonly leases: Leases,
     private readonly meetings: Meetings,
+    private readonly chat: Chat,
     private readonly doorbells: Doorbells,
   ) {}
 
@@ -41,6 +43,7 @@ export class Workspace {
       leases: this.leases.activeLeases().map((l) => ({ glob: l.glob, agent: l.agent, task: l.task_id ? keyOf(l.task_id) ?? null : null, exclusive: !!l.exclusive, expires_at: l.expires_at })),
       meeting: meeting ? { id: meeting.id, topic: meeting.topic, status: meeting.status, minutes: meeting.doc_path } : null,
       notes: this.ctx.store.notes().map((x) => ({ topic: x.topic, by: x.agent, text: x.text, at: x.created_at })),
+      chat: this.chat.history(10),
       project_dir: this.ctx.cfg.projectDir,
     };
   }
@@ -202,6 +205,7 @@ export class Workspace {
         id: m.id, from: m.from_agent, to: m.to_agent, kind: m.kind, subject: m.subject, status: m.status,
         ring_count: m.ring_count, created_at: m.created_at, overdue: !!m.overdue_flagged, waitingForTurn: waitingForTurn.has(m.id),
       })),
+      chat: this.chat.recent(50, (a) => this.postman.isBusy(a)),
       endpoints: this.ctx.store.endpoints(),
       notes: this.ctx.store.notes().slice(-20).reverse(),
       events: this.ctx.store.recentEvents(40),

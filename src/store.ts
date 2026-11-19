@@ -170,7 +170,20 @@ export interface Question {
 }
 
 export type MailStatus = "queued" | "rung" | "fetched" | "acked" | "stuck" | "void";
-export type MailKind = "task" | "answer" | "human" | "agent" | "system" | "meeting";
+export type MailKind = "task" | "answer" | "human" | "agent" | "system" | "meeting" | "chat";
+
+/** A message in the project's chat room. Delivery to each mentioned agent is a `chat` mail (no ack):
+ *  its status is the per-recipient receipt (queued → rung → fetched = read). */
+export interface ChatMessage {
+  id: number;
+  from_agent: string; // agent id or "human"
+  text: string;
+  mentions: string[]; // agents this message was delivered to
+  reply_to: number | null;
+  run_id: number | null;
+  meeting_id: number | null;
+  created_at: string;
+}
 
 /** One row per recipient. The id is the dedupe key (INSERT OR IGNORE). */
 export interface Mail {
@@ -271,6 +284,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS meeting_turns (
         id INTEGER PRIMARY KEY, meeting_id INTEGER NOT NULL, round INTEGER NOT NULL, kind TEXT NOT NULL, agent TEXT NOT NULL,
         content TEXT NOT NULL, tasks TEXT, decisions TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY, from_agent TEXT NOT NULL, text TEXT NOT NULL, mentions TEXT NOT NULL,
+        reply_to INTEGER, run_id INTEGER, meeting_id INTEGER, created_at TEXT NOT NULL);
     `);
     // Migrations for databases created by earlier versions.
     const cols = (t: string) => (this.db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
@@ -579,6 +595,30 @@ export class Store {
   }
   answerQuestion(id: number, answer: string) {
     this.exec("UPDATE questions SET answer = ?, answered_at = ? WHERE id = ? AND answer IS NULL", answer, now(), id);
+  }
+
+  // ---- chat room
+  addChat(m: Omit<ChatMessage, "id" | "created_at">) {
+    return this.insert(
+      "INSERT INTO chat_messages (from_agent, text, mentions, reply_to, run_id, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      m.from_agent, m.text, JSON.stringify(m.mentions), m.reply_to, m.run_id, m.meeting_id, now(),
+    );
+  }
+  private chatRow = (r: any): ChatMessage => ({ ...r, mentions: JSON.parse(r.mentions) });
+  chatMessage(id: number) {
+    const r = this.one<any>("SELECT * FROM chat_messages WHERE id = ?", id);
+    return r ? this.chatRow(r) : undefined;
+  }
+  /** The latest `limit` messages (before `beforeId` when given), oldest first. */
+  recentChat(limit = 50, beforeId?: number) {
+    const rows = beforeId
+      ? this.all<any>("SELECT * FROM chat_messages WHERE id < ? ORDER BY id DESC LIMIT ?", beforeId, limit)
+      : this.all<any>("SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", limit);
+    return rows.reverse().map(this.chatRow);
+  }
+  /** Messages after the latest human message (how long agents have been talking among themselves). */
+  chatSinceHuman() {
+    return this.all<any>("SELECT * FROM chat_messages WHERE id > COALESCE((SELECT MAX(id) FROM chat_messages WHERE from_agent = 'human'), 0) ORDER BY id").map(this.chatRow);
   }
 
   // ---- event feed (progress reports + system events), shown on the panel

@@ -50,8 +50,11 @@ mail:
   ring_retry_seconds: 120     # 按了门铃但没来取信 → 隔这么久再按
   max_rings: 3                # 按这么多次仍没反应 → 通知你去叫醒它
   ack_timeout_seconds: 600    # 取走需要确认的信后这么久没确认 → 标红并通知你
+chat:
+  history: 10                 # 聊天信附带的前文条数
+  max_agent_turns: 6          # 成员之间连续聊这么多条（中间你没说话）后，它们的 @ 不再叫醒对方，避免互相刷屏
 notify:
-  enabled: true               # Windows 通知
+  enabled: true              # Windows 通知
 git:
   auto_commit: true           # 每次交接自动提交。只有一个任务在进行时提交全部改动；有并行任务时只提交本任务范围内的文件
   commit_reviews: true        # 审查没改文件也生成一个空提交，git log 里能看到审查结论

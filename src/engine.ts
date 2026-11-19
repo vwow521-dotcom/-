@@ -1,6 +1,7 @@
 // Assemble the bridge engine. The HTTP and MCP layers call each service directly.
 import type { Config } from "./config.js";
 import { Doorbells } from "./doorbells/index.js";
+import { Chat } from "./engine/chat.js";
 import { EngineContext } from "./engine/context.js";
 import { Leases } from "./engine/leases.js";
 import { Meetings } from "./engine/meetings.js";
@@ -18,6 +19,7 @@ export class Engine {
   readonly scheduler: Scheduler;
   readonly meetings: Meetings;
   readonly workspace: Workspace;
+  readonly chat: Chat;
 
   constructor(readonly cfg: Config, store: Store) {
     const ctx = this.context = new EngineContext(cfg, store);
@@ -38,6 +40,7 @@ export class Engine {
     this.postman = new Postman(ctx, this.presence, doorbells, {
       task: (mail) => this.scheduler.readTaskMail(mail),
       meeting: (mail) => this.meetings.readMeetingMail(mail),
+      chat: (mail) => this.chat.readChatMail(mail),
     });
     this.leases = new Leases(ctx, this.presence, this.postman, {
       currentTask: (agent) => this.scheduler.currentTask(agent),
@@ -45,7 +48,8 @@ export class Engine {
     });
     this.scheduler = new Scheduler(ctx, this.presence, this.postman, this.leases);
     this.meetings = new Meetings(ctx, this.presence, this.postman, this.scheduler);
-    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, doorbells);
+    this.chat = new Chat(ctx, this.presence, this.postman);
+    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, this.chat, doorbells);
     this.postman.startSweep(() => this.scheduler.retryBlockedTasks());
   }
 }

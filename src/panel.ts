@@ -20,6 +20,10 @@ button.primary{background:var(--acc);border-color:var(--acc);color:#fff}button.d
 .banner{border-radius:8px;padding:10px 14px;margin:12px 0}.banner.fallback{background:#fde2e2;color:#7a1d1d}.banner.stale{background:#fff3cd;color:#6b4e00}
 table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-size:13px}
 ul{margin:4px 0;padding-left:20px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
+.chat{max-height:360px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.msg{max-width:80%;padding:6px 10px;border-radius:10px;background:var(--chip);white-space:pre-wrap;word-break:break-word}
+.msg.me{align-self:flex-end;background:var(--acc);color:#fff}.msg.me a{color:#fff}
+.msg .meta{font-size:12px;color:var(--mute);margin-bottom:2px}.msg.me .meta,.msg.me .rc{color:#e6e6ff}.rc{font-size:12px;color:var(--mute)}
 .feed div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}.err{color:var(--bad);font-size:13px}
 a{color:var(--acc)}
 </style></head><body><main>
@@ -94,6 +98,31 @@ async function sendMsg(agent) {
   if (!el.value.trim()) return;
   try { await post("/api/mail", { to: agent, text: el.value }); el.value = ""; } catch (e) { alert(e.message); }
   load();
+}
+let replyTo = null;
+async function sendChat() {
+  const el = $("#chatin");
+  if (!el.value.trim()) return;
+  $("#chaterr").textContent = "";
+  try { await post("/api/chat", { text: el.value, reply_to: replyTo && replyTo.id }); el.value = ""; setReply(null); } catch (e) { $("#chaterr").textContent = e.message; }
+  load();
+}
+function mention(id) {
+  const el = $("#chatin");
+  el.value = (el.value && el.value.slice(-1) !== " " ? el.value + " " : el.value) + "@" + id + " ";
+  el.focus();
+}
+function chatKey(e) {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChat(); }
+}
+function replyLabel() {
+  return replyTo ? "　回复 #" + replyTo.id + "（" + esc(replyTo.who) + "） <a href='#' onclick='setReply(null);return false'>取消</a>" : "";
+}
+function setReply(id, who) {
+  replyTo = id ? { id, who } : null;
+  const el = $("#replyto");
+  if (el) el.innerHTML = replyLabel();
+  if (id) $("#chatin").focus();
 }
 async function answer(id) {
   const a = document.getElementById("ans-" + id).value;
@@ -233,6 +262,23 @@ function render(s) {
       '</div><div class="row" style="margin-top:8px"><input id="ans-' + q.id + '" data-keep class="grow" placeholder="你的回答"><button class="primary" onclick="answer(' + q.id + ')">回答</button></div></div>';
 
   const waitingForTurn = "排队中，等对方这一轮结束";
+  const rcText = { queued: "待投递", rung: "已按门铃", fetched: "已读", acked: "已读", stuck: "送不到", void: "作废" };
+  const rcCls = { fetched: "s-working", acked: "s-working", stuck: "err", void: "mute" };
+  const chatHtml = s.chat.map((c) => {
+    const me = c.from_agent === "human";
+    const rc = c.receipts.map((r) => '<span class="' + (me ? "" : rcCls[r.status] || "") + '">' + esc(r.agent) + " " + (r.waitingForTurn ? "排队中" : rcText[r.status] || r.status) + "</span>").join(" · ");
+    return '<div class="msg' + (me ? " me" : "") + '"><div class="meta">' + (me ? "你" : esc(c.from_agent)) + " · " + t(c.created_at) + " · #" + c.id +
+      (c.reply_to ? " · 回复 #" + c.reply_to : "") +
+      (me ? "" : ' · <a href="#" data-id="' + c.id + '" data-who="' + esc(c.from_agent) + '" onclick="setReply(Number(this.dataset.id), this.dataset.who);return false">回复</a>') +
+      "</div>" + esc(c.text) + (rc ? '<div class="rc">' + rc + "</div>" : "") + "</div>";
+  }).join("");
+  const mentionLink = (id) => '<a href="#" data-id="' + esc(id) + '" onclick="mention(this.dataset.id);return false"><small>@' + esc(id) + "</small></a>";
+  h += '<div class="card"><h2>聊天</h2><div class="chat" id="chatlog">' +
+    (chatHtml || '<small class="mute">用 @ 叫上成员聊几句，例如「@codex 这个接口为什么要改？」。聊天不改变任务状态。</small>') + "</div>" +
+    '<div class="row"><small class="mute">叫上：</small>' + s.agents.map((a) => mentionLink(a.id)).join(" ") + " " + mentionLink("all") +
+    '<span id="replyto" class="mute" style="font-size:12px">' + replyLabel() + "</span></div>" +
+    '<div class="row" style="margin-top:6px;flex-wrap:nowrap"><textarea id="chatin" data-keep rows="2" class="grow" placeholder="说点什么，用 @ 指定发给谁（Ctrl+Enter 发送）" onkeydown="chatKey(event)"></textarea>' +
+    '<button class="primary" onclick="sendChat()">发送</button></div><div class="err" id="chaterr"></div></div>';
   h += '<div class="card"><h2>成员</h2><table><tr><th>agent</th><th>负责</th><th>状态</th><th>门铃</th><th>信件</th><th>上次活动</th><th>发消息</th></tr>' +
     s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) +
       (a.binding ? '<br><small class="mute" title="绑定的会话 ' + esc(a.binding.session) + '">绑定于 ' + t(a.binding.since) +
@@ -270,7 +316,11 @@ function render(s) {
   const kept = {};
   document.querySelectorAll("#app [data-keep]").forEach((el) => (kept[el.id] = el.value));
   const focused = document.activeElement && document.activeElement.id;
+  const log0 = document.getElementById("chatlog");
+  const atBottom = !log0 || log0.scrollHeight - log0.scrollTop - log0.clientHeight < 40;
   $("#app").innerHTML = h;
+  const log1 = document.getElementById("chatlog");
+  if (log1 && atBottom) log1.scrollTop = log1.scrollHeight;
   for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el) el.value = v; }
   if (focused) { const el = document.getElementById(focused); if (el) el.focus(); }
   tickAgo();

@@ -164,12 +164,31 @@ try {
   const ans = await ansWait;
   check(ans.mails?.some((m: any) => m.kind === "answer" && m.body.includes("是")), "answer arrives as mail");
 
-  await api("/api/mail", { to: "codex", text: "顺便加个注释" });
+  // Chat: the per-agent message box and the chat room are chat mail (no ack); the mail status is the receipt.
+  const boxed = await api("/api/mail", { to: "codex", text: "顺便加个注释" });
   const inbox = await call(codex, "fetch_inbox", { agent_id: "codex" });
-  const hm = inbox.mails.find((m: any) => m.kind === "human");
-  check(hm?.ack_required && hm.body.includes("加个注释"), "human panel message delivered, ack required");
-  await call(codex, "ack", { agent_id: "codex", mail_ids: [hm.id] });
-  check((await state()).mail.find((m: any) => m.id === hm.id).status === "acked", "human mail acked");
+  const hm = inbox.mails.find((m: any) => m.kind === "chat");
+  check(hm?.id === boxed.json.id && !hm.ack_required && hm.chat.text === "顺便加个注释" && hm.chat.from === "human", "panel message box → chat mail, no ack required");
+  s = await state();
+  check(s.chat.at(-1).receipts[0].status === "fetched" && s.chat.at(-1).receipts[0].read_at, "fetching a chat mail is the read receipt");
+  check((await api("/api/chat", { text: "没有点名" })).status === 409, "human chat without @ is refused");
+  check((await api("/api/chat", { text: "x", mentions: ["nobody"] })).status === 409, "unknown mention refused");
+  const room = await api("/api/chat", { text: "@claude你好，@codex 也看一下" });
+  check(JSON.stringify(room.json.delivered_to?.sort()) === '["claude","codex"]', "@names found in Chinese text (no space after the name)");
+  const roomMail = (await call(codex, "fetch_inbox", { agent_id: "codex" })).mails.find((m: any) => m.kind === "chat");
+  check(roomMail?.chat.earlier.some((x: any) => x.text === "顺便加个注释"), "chat mail carries the earlier conversation");
+  const said = await call(codex, "say", { agent_id: "codex", text: "收到，等我写完 T1", reply_to: roomMail.chat.message_id, mentions: ["claude"] });
+  check(said.ok && JSON.stringify(said.delivered_to) === '["claude"]', "say with mentions wakes the mentioned agent");
+  const claudeChat = (await call(claude, "fetch_inbox", { agent_id: "claude" })).mails.filter((m: any) => m.kind === "chat");
+  check(claudeChat.length === 2 && claudeChat[1].chat.reply_to?.id === roomMail.chat.message_id, "claude gets the room message and codex's reply");
+  const back = await call(claude, "say", { agent_id: "claude", text: "好的", reply_to: said.message_id });
+  check(JSON.stringify(back.delivered_to) === '["codex"]', "replying to an agent's message reaches it without @");
+  check((await call(claude, "say", { agent_id: "claude", text: "只给用户看" })).delivered_to.length === 0, "say without mentions is for the human only");
+  let muted: any;
+  for (let i = 0; i < 4; i++) muted = await call(claude, "say", { agent_id: "claude", text: "@codex 再聊一句 " + i });
+  check(muted.muted?.[0] === "codex" && muted.delivered_to.length === 0, "agents stop waking each other after max_agent_turns without the human");
+  check((await call(codex, "get_context", { agent_id: "codex" })).chat.some((x: any) => x.text === "只给用户看"), "get_context includes recent chat");
+  await call(codex, "fetch_inbox", { agent_id: "codex" }); // drain the chat mail
 
   const d1 = await call(codex, "send_mail", { agent_id: "codex", to: "claude", subject: "提醒", body: "x", mail_id: "dup-1" });
   const d2 = await call(codex, "send_mail", { agent_id: "codex", to: "claude", subject: "提醒", body: "x", mail_id: "dup-1" });
@@ -474,7 +493,7 @@ try {
   await sleep(300);
   check((await state()).mail.find((m: any) => m.to === "pbot").status === "rung", "mail marked rung");
   const pi = await call(proxy as Client, "fetch_inbox", { agent_id: "pbot" });
-  check(pi.mails[0]?.body.includes("该干活了"), "agent fetches the mail through the proxy");
+  check(pi.mails[0]?.chat?.text.includes("该干活了"), "agent fetches the mail through the proxy");
   const firstBinding = (await state()).agents.find((a: any) => a.id === "pbot").binding?.session;
   const alias = await connectClaudeProxy(pipePath + "-other");
   check((await call(alias.proxy, "fetch_inbox", { agent_id: "pbot" })).error &&

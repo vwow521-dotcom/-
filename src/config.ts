@@ -77,6 +77,13 @@ const ConfigSchema = z
         ack_timeout_seconds: z.number().positive().default(600), // fetched ack_required mail not acked → flag
       })
       .default({ ring_retry_seconds: 120, max_rings: 3, ack_timeout_seconds: 600 }),
+    chat: z
+      .object({
+        history: z.number().int().min(0).max(50).default(10), // earlier messages sent along with a chat mail
+        // Agent messages in a row (no human message in between) after which agents' @mentions stop waking anyone.
+        max_agent_turns: z.number().int().positive().default(6),
+      })
+      .default({ history: 10, max_agent_turns: 6 }),
     notify: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
     git: z
       .object({

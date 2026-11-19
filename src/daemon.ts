@@ -151,11 +151,18 @@ app.post("/api/questions/:id/answer", (req, res) => {
 });
 app.post("/api/agents/:id/release", (req, res) => reply(res, engine.presence.release(req.params.id, "human")));
 
+// The human's chat: `mentions` and/or @names in the text pick who is woken.
+app.post("/api/chat", (req, res) => {
+  const mentions = Array.isArray(req.body?.mentions) ? req.body.mentions.map(String) : [];
+  const replyTo = req.body?.reply_to ? Number(req.body.reply_to) : undefined;
+  reply(res, engine.chat.post("human", String(req.body?.text ?? ""), mentions, replyTo));
+});
+// One agent's message box: a chat message to that agent. `id` is its mail (the receipt).
 app.post("/api/mail", (req, res) => {
   const to = String(req.body?.to ?? "");
-  const t = String(req.body?.text ?? "").trim();
-  if (!t) return void res.status(400).json({ error: "消息不能为空" });
-  reply(res, engine.postman.sendFromHuman(to, t));
+  if (!engine.presence.isAgent(to)) return void res.status(409).json({ error: "未知收件人" });
+  const r = engine.chat.post("human", String(req.body?.text ?? ""), [to]);
+  reply(res, r.error ? r : { ...r, id: (r.mail_ids as Record<string, string>)[to] });
 });
 
 // Parked doorbells: the stdio proxy (claude-socket) and a parking Codex Stop hook (codex-hook) long-poll here.

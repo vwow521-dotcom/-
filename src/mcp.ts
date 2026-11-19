@@ -35,7 +35,7 @@ export function buildServer(engine: Engine): McpServer {
     "fetch_inbox",
     {
       title: "取信",
-      description: "取走你所有未读的信（任务、会议发言邀请、用户消息、问题答复、其他成员的来信）。被「[协作桥]」消息叫醒后调用。",
+      description: "取走你所有未读的信（任务、会议发言邀请、聊天消息、问题答复、其他成员的来信）。被「[协作桥]」消息叫醒后调用。",
       inputSchema: { agent_id: agentId },
     },
     async ({ agent_id }, extra) => withAgent(agent_id, extra.sessionId, () => engine.postman.fetchInbox(agent_id, extra.sessionId)),
@@ -85,6 +85,24 @@ export function buildServer(engine: Engine): McpServer {
     },
     async ({ agent_id, to, subject, body, ack_required, mail_id }, extra) =>
       withAgent(agent_id, extra.sessionId, () => engine.postman.sendFromAgent(agent_id, extra.sessionId, to, subject, body, mail_id, ack_required)),
+  );
+
+  server.registerTool(
+    "say",
+    {
+      title: "在聊天里发言",
+      description:
+        "在项目聊天室里说一句话，用户在面板上能看到。回答 chat 信时带上 reply_to。用 mentions（或正文里的 @名字）叫醒其他成员；不 @ 任何人就只给用户看。" +
+        "交付工作用 submit_handoff，正式协调用 send_mail，聊天只用来简短交流。",
+      inputSchema: {
+        agent_id: agentId,
+        text: z.string().describe("要说的话，简短"),
+        mentions: z.array(z.string()).optional().describe(`要叫醒的成员，可选：${ids}，或 all`),
+        reply_to: z.number().int().optional().describe("回复哪条聊天消息（chat 信里的 message_id）"),
+      },
+    },
+    async ({ agent_id, text: t, mentions, reply_to }, extra) =>
+      withAgent(agent_id, extra.sessionId, () => engine.chat.say(agent_id, extra.sessionId, t, mentions ?? [], reply_to)),
   );
 
   server.registerTool(

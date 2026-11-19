@@ -21,6 +21,7 @@ export class Postman {
     private readonly payloads: {
       task(mail: Mail): Result | null;
       meeting(mail: Mail): Result | null;
+      chat(mail: Mail): Result | null;
     },
   ) {}
 
@@ -274,6 +275,13 @@ export class Postman {
           continue;
         }
         out.push({ ...this.mailView(m), meeting });
+      } else if (m.kind === "chat") {
+        const chat = this.payloads.chat(m);
+        if (!chat) {
+          this.ctx.store.setMailStatus([m.id], "void");
+          continue;
+        }
+        out.push({ ...this.mailView(m), chat });
       } else {
         out.push({ ...this.mailView(m), body: m.body });
       }
@@ -285,7 +293,7 @@ export class Postman {
     return {
       mails: out,
       instructions: out.length
-        ? "逐封处理：task 信完成后调用 submit_handoff（自动确认）；meeting 信发言后调用 submit_meeting_turn（自动确认）；其他 ack_required 的信处理后调用 ack。" +
+        ? "逐封处理：task 信完成后调用 submit_handoff（自动确认）；meeting 信发言后调用 submit_meeting_turn（自动确认）；chat 信不用确认，需要回答时调用 say；其他 ack_required 的信处理后调用 ack。" +
           (kind === "poll" ? "全部处理完后调用 wait_for_mail 继续等信。" : "全部处理完后结束本回合，有新信时会叫醒你。")
         : kind === "poll"
           ? "没有新信。调用 wait_for_mail 等信。"
@@ -360,24 +368,6 @@ export class Postman {
     const run = this.ctx.store.openRun();
     const r = this.sendMail({ id: mailId, run_id: run?.id ?? null, from: agent, to, kind: "agent", subject, body, ack_required: ackRequired });
     if (!r.duplicate) this.ctx.event(run?.id ?? null, agent, "mail", `${agent} → ${to}：${subject}`);
-    return { ok: true, ...r };
-  }
-
-  sendFromHuman(to: string, text: string): Result {
-    if (!this.presence.isAgent(to)) return err("未知收件人");
-    const run = this.ctx.store.openRun();
-    const subject = "用户消息：" + (text.length > 30 ? text.slice(0, 30) + "…" : text);
-    const r = this.sendMail({
-      run_id: run?.id ?? null,
-      from: "human",
-      to,
-      kind: "human",
-      subject,
-      body: `【用户直接发来的消息，优先处理；处理后调用 ack 确认】\n${text}`,
-      importance: "high",
-      ack_required: true,
-    });
-    this.ctx.event(run?.id ?? null, null, "mail", `你 → ${to}：${text}`);
     return { ok: true, ...r };
   }
 }
