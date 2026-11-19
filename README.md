@@ -12,12 +12,15 @@
 需要 Node.js 22.13 或更新版本，以及 Git。在 PowerShell 中运行：
 
 ```powershell
-npm install -g github:vwow521-dotcom/Interaction-ai
+git clone https://github.com/vwow521-dotcom/Interaction-ai.git
+cd Interaction-ai
+npm ci
+node bin/ai-bridge.mjs update
 ai-bridge setup
 ai-bridge doctor
 ```
 
-npm 会克隆仓库，并在本机构建。`ai-bridge setup` 会先备份配置，再注册 Claude 和 Codex 的 MCP 服务以及 Codex Stop hook。只用其中一个客户端的话，`setup` 之后把另一个的配置删掉即可，后续更新不会把它加回来。
+`update` 会从 GitHub 取 `main`，在临时目录里构建并打包，再全局安装。克隆下来的这份只用来第一次启动 `update`，之后可以删掉。不要用 `npm install -g github:…`：npm 全局安装 git 包时，构建拿不到依赖，会失败，而且失败时已经删掉了原来的安装。`ai-bridge setup` 会先备份配置，再注册 Claude 和 Codex 的 MCP 服务以及 Codex Stop hook。只用其中一个客户端的话，`setup` 之后把另一个的配置删掉即可，后续更新不会把它加回来。
 
 安装后，在 Codex 的 **Settings > Hooks** 里信任新的 Stop hook，然后在 Claude 和 Codex 里各新开一个对话。
 

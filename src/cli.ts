@@ -309,23 +309,47 @@ function remoteCommit(ref: string): string | null {
 async function update() {
   if (!REPO) return bad("package.json 里没有 GitHub 仓库地址，没法从 GitHub 更新");
   const ref = opt("ref") ?? "main";
-  const spec = `github:${REPO}#${ref}`;
-  console.log(`协作桥 ${VERSION}（${short(BUILD.commit)}）：从 GitHub 更新 ${spec}`);
+  const url = `https://github.com/${REPO}.git`;
+  console.log(`协作桥 ${VERSION}（${short(BUILD.commit)}）：从 GitHub 更新 ${REPO}#${ref}`);
   const latest = remoteCommit(ref);
   if (latest && latest === BUILD.commit && !BUILD.dirty && !flag("force"))
     return ok(`已经是 ${ref} 的最新提交 ${short(latest)}（要强制重装加 --force）`);
+  // Not `npm install -g github:…`: for a global git install npm runs the clone's dependency install in
+  // global mode, so prepare (tsc) fails without its dependencies, and npm has already removed the old copy.
+  // Instead: fetch + build in a temp folder, and only touch the global install once a package exists.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ai-bridge-update-"));
+  const src = path.join(tmp, "src");
+  const steps: [string, string][] = [
+    [tmp, `git init -q src`],
+    [src, `git fetch -q --depth 1 ${url} ${ref}`],
+    [src, "git checkout -q FETCH_HEAD"],
+    [src, "npm ci --no-audit --no-fund"], // runs prepare: build + dist/build-info.json
+    [src, `npm pack --ignore-scripts --pack-destination "${tmp}"`],
+  ];
+  if (DRY) {
+    steps.forEach(([, c]) => info(`[dry-run] 会运行：${c}`));
+    ["npm install -g <打好的包>", "ai-bridge setup --refresh", "ai-bridge doctor"].forEach((c) => info(`[dry-run] 会运行：${c}`));
+    return fs.rmSync(tmp, { recursive: true, force: true });
+  }
   const running = await bridgeRunning();
-  const cmds = [`npm install -g ${spec}`, "ai-bridge setup --refresh", "ai-bridge doctor"];
-  if (DRY) return cmds.forEach((c) => info(`[dry-run] 会运行：${c}`));
+  // Drop npm settings inherited from an outer `npm run` / `npm -g` so the build installs locally.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^npm_config_(global|location|prefix)$/i.test(k)));
+  const run = (cwd: string, c: string) => {
+    console.log(`\n$ ${c}`);
+    execSync(c, { cwd, stdio: "inherit", env });
+  };
   try {
-    // Run through the shell so npm.cmd / the freshly installed ai-bridge shim are found on Windows;
-    // setup and doctor run as new processes, i.e. with the new code.
-    for (const c of cmds) {
-      console.log(`\n$ ${c}`);
-      execSync(c, { stdio: "inherit" });
-    }
+    for (const [cwd, c] of steps) run(cwd, c);
+    const tgz = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
+    if (!tgz) throw new Error("npm pack 没有产出安装包");
+    // Shell-run so npm.cmd and the freshly installed ai-bridge shim are found; setup/doctor run the new code.
+    run(tmp, `npm install -g "${path.join(tmp, tgz)}"`);
+    run(tmp, "ai-bridge setup --refresh");
+    run(tmp, "ai-bridge doctor");
   } catch {
-    return bad("更新中断了，上面是出错的输出");
+    return bad("更新中断了，上面是出错的输出（全局安装只在最后一步才会被替换）");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
   console.log("\n更新完成。Claude 和 Codex 新开的对话会用新版本（已开的对话还在用旧的转接程序）。");
   if (running) console.log(`桥正在为 ${running.project} 运行，还是旧代码：停掉后重新 ai-bridge start 一次。`);

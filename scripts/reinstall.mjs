@@ -15,6 +15,6 @@ const tgz = `release/ai-bridge-${version}.tgz`;
 
 fs.mkdirSync("release", { recursive: true });
 run("npm pack --pack-destination release");
-run(`npm install -g ${tgz}`);
+run(`npm install -g ./${tgz}`); // "./": a bare "release/x.tgz" is read as a GitHub owner/repo
 run("ai-bridge setup --refresh");
 run("ai-bridge doctor");

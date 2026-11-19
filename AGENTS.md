@@ -18,7 +18,7 @@ npm run smoke       # end-to-end regression: own daemon on port 7891, temp git r
 npm run typecheck
 npm run build       # tsc -p tsconfig.build.json → dist/ (src/m0 excluded)
 npm run reinstall   # npm pack into release/ → npm i -g → ai-bridge setup --refresh → ai-bridge doctor (local tree)
-ai-bridge update    # install github:vwow521-dotcom/Interaction-ai#main globally → setup --refresh → doctor
+ai-bridge update    # fetch GitHub main into a temp dir → npm ci → npm pack → npm i -g → setup --refresh → doctor (never `npm i -g github:…`: npm runs the clone's install in global mode, prepare fails, and the old install is already gone)
 npm run cli -- <cmd> [--dry-run]   # run the CLI from this tree (setup/uninstall/init/start/doctor)
 ```
 

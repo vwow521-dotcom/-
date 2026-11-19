@@ -13,12 +13,15 @@
 需要 Node.js 22.13 或更新版本，以及 Git。
 
 ```powershell
-npm install -g github:vwow521-dotcom/Interaction-ai
+git clone https://github.com/vwow521-dotcom/Interaction-ai.git
+cd Interaction-ai
+npm ci
+node bin/ai-bridge.mjs update
 ai-bridge setup
 ai-bridge doctor
 ```
 
-npm 会克隆仓库，并在本机构建（`prepare` 脚本），同时把这次构建对应的提交记进 `dist/build-info.json`，`doctor` 用它判断安装是否最新。
+`update` 会把 GitHub 上的 `main` 取到临时目录，然后 `npm ci`（`prepare` 脚本负责构建，并把提交号记进 `dist/build-info.json`，`doctor` 用它判断是否最新）→ `npm pack` → `npm install -g <包>`。只有最后一步才会替换全局安装，前面任何一步失败，旧版都还在。不要用 `npm install -g github:…`：npm 全局安装 git 包时构建拿不到依赖，会失败，而且会先删掉原来的安装。
 
 `setup` 会做下面几件事，每改一个文件都会先在原位置备份（`*.bak-ai-bridge-<时间>`）：
 
@@ -93,7 +96,7 @@ npm uninstall -g ai-bridge
 
 ```powershell
 ai-bridge doctor     # 第一行：安装自哪个提交，是否落后于 GitHub main
-ai-bridge update     # npm install -g github:… → ai-bridge setup --refresh → ai-bridge doctor
+ai-bridge update     # 临时目录取 GitHub main → npm ci → npm pack → npm install -g → setup --refresh → doctor
 ```
 
 - `setup --refresh` 只更新**已经存在**的 bridge 配置，不会新增。你有意删掉的客户端（比如不用 Codex 时删掉的 `[mcp_servers.bridge]`）不会被加回来。要新增客户端就运行一次 `ai-bridge setup`。
