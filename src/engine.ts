@@ -57,9 +57,17 @@ export interface RingResult {
   text?: string;
 }
 
+interface DoorbellWaiter {
+  kind: DoorbellKind;
+  finish: (result: RingResult) => void;
+}
+
 type Result = Record<string, unknown>;
 const err = (error: string): Result => ({ error });
 const DOORBELL_ARMED_MS = 70_000;
+// After a Codex ring, how long to wait for a sign of life before telling the human. A woken Codex may
+// think for a while before its first tool call; a Codex that ignored the block ends its turn within ~1 s.
+const CODEX_WAKE_GRACE_MS = Number(process.env.BRIDGE_CODEX_WAKE_GRACE_SECONDS ?? 20) * 1000;
 const LIVE_MAIL = ["queued", "rung", "stuck"] as const;
 const KIND_LABEL: Record<MeetingTurnKind, string> = { proposal: "提案", critique: "互评", final: "定稿" };
 const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
@@ -67,7 +75,8 @@ const inGlob = (g: string, f: string) => globMatch(normGlob(g), f);
 
 export class Engine {
   private presence = new Map<string, Presence>();
-  private doorbellWaiters = new Map<string, Set<(r: RingResult) => void>>();
+  private doorbellWaiters = new Map<string, Set<DoorbellWaiter>>();
+  private codexWakeAlerts = new Set<string>(); // mail IDs already reported to the human
   private mailWakers = new Map<string, () => void>();
   private taskWaits = new Map<number, string>(); // task id → why a ready-to-start task hasn't started (lease conflict)
   private logFile: string;
@@ -249,6 +258,7 @@ export class Engine {
 
   /** Doorbell long-poll from the stdio proxy (claude-socket) or the Codex Stop hook (codex-hook). */
   doorbellWait(agent: string, kind: DoorbellKind, timeoutMs: number, signal: AbortSignal): Promise<RingResult> {
+    if (signal.aborted) return Promise.resolve({ ring: false });
     const p = this.presence.get(agent)!;
     if (this.cfg.agents[agent]?.doorbell === "auto" || kind !== "poll") p.registeredDoorbell = kind;
     p.doorbellSeenAt = Date.now();
@@ -258,15 +268,16 @@ export class Engine {
       const done = (r: RingResult) => {
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
-        set.delete(done);
+        set.delete(waiter);
         p.doorbellSeenAt = Date.now();
         resolve(r);
         this.onChange();
       };
+      const waiter = { kind, finish: done };
       const onAbort = () => done({ ring: false });
       const timer = setTimeout(() => done({ ring: false }), timeoutMs);
       signal.addEventListener("abort", onAbort);
-      set.add(done);
+      set.add(waiter);
       this.onChange();
       if (this.store.mailByStatus(agent, ["queued"]).length) this.kick(agent);
     });
@@ -336,20 +347,47 @@ export class Engine {
     p.lastRingAt = Date.now();
     this.log("doorbell_ring", { agent, via: this.doorbellKind(agent), mails: ids });
     this.event(null, agent, "doorbell", `按门铃叫醒 ${agent}（${queued.length} 封信）`);
-    for (const w of [...waiters]) w({ ring: true, mailIds: ids, text });
+    const parked = [...waiters];
+    for (const w of parked) w.finish({ ring: true, mailIds: ids, text });
+    if (parked.some((w) => w.kind === "codex-hook")) {
+      const rangAt = Date.now();
+      setTimeout(() => this.checkCodexWake(agent, ids, rangAt), CODEX_WAKE_GRACE_MS).unref();
+    }
+  }
+
+  /** A completed hook poll only proves that the bridge rang. Give Codex a few seconds to fetch. */
+  private checkCodexWake(agent: string, ids: string[], rangAt: number) {
+    const waiters = this.doorbellWaiters.get(agent);
+    if (waiters && [...waiters].some((w) => w.kind === "codex-hook")) return;
+    // Any tool call since the ring means Codex woke up and is working; it will fetch in its own time.
+    if ((this.presence.get(agent)?.lastSeenAt ?? 0) >= rangAt) return;
+    const unread = ids.filter((id) => {
+      const status = this.store.mail(id)?.status;
+      return (status === "rung" || status === "queued") && !this.codexWakeAlerts.has(id);
+    });
+    if (!unread.length) return;
+    for (const id of unread) this.codexWakeAlerts.add(id);
+    this.log("codex_wake_timeout", { agent, mails: unread, graceMs: CODEX_WAKE_GRACE_MS });
+    this.event(null, agent, "doorbell", `${agent} 已响铃，Stop hook 已结束等待，仍有 ${unread.length} 封信未取`);
+    this.notifyHuman(`协作桥：需要你叫醒 ${agent}`, `${agent} 已响铃但尚未取信。请在该对话里说「继续」。`);
   }
 
   /** Periodic: re-ring mail nobody fetched, give up after max_rings, flag overdue acks, retry lease-blocked tasks. */
   private sweep() {
     const now = Date.now();
     const { ring_retry_seconds, max_rings, ack_timeout_seconds } = this.cfg.mail;
+    for (const id of this.codexWakeAlerts) {
+      const status = this.store.mail(id)?.status;
+      if (!status || !LIVE_MAIL.some((s) => s === status)) this.codexWakeAlerts.delete(id);
+    }
     for (const m of this.store.allMailByStatus(["rung"])) {
       if (now - Date.parse(m.rung_at!) < ring_retry_seconds * 1000) continue;
       if (m.ring_count >= max_rings) {
         this.store.setMailStatus([m.id], "stuck");
         this.log("mail_stuck", { id: m.id, to: m.to_agent });
         this.event(m.run_id, m.to_agent, "stuck", `${m.to_agent} 没有响应门铃：「${m.subject}」`);
-        this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `门铃按了 ${m.ring_count} 次没有回应。请在 ${m.to_agent} 里说「继续」。`);
+        if (!this.codexWakeAlerts.has(m.id))
+          this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `门铃按了 ${m.ring_count} 次没有回应。请在 ${m.to_agent} 里说「继续」。`);
       } else {
         this.store.setMailStatus([m.id], "queued");
         this.kick(m.to_agent);
@@ -363,7 +401,8 @@ export class Engine {
       this.store.setMailStatus([m.id], "stuck");
       this.log("mail_stuck", { id: m.id, to: m.to_agent, reason: "no doorbell" });
       this.event(m.run_id, m.to_agent, "stuck", `${m.to_agent} 的门铃没有接上，「${m.subject}」送不到`);
-      this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `${m.to_agent} 现在没有在等信。请在 ${m.to_agent} 里说「继续」。`);
+      if (!this.codexWakeAlerts.has(m.id))
+        this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `${m.to_agent} 现在没有在等信。请在 ${m.to_agent} 里说「继续」。`);
     }
     for (const m of this.store.allMailByStatus(["fetched"])) {
       if (!m.ack_required || m.overdue_flagged || now - Date.parse(m.fetched_at!) < ack_timeout_seconds * 1000) continue;
@@ -414,6 +453,7 @@ export class Engine {
         out.push({ ...this.mailView(m), body: m.body });
       }
       this.store.setMailStatus([m.id], "fetched");
+      if (m.rung_at) this.log("rung_mail_fetched", { id: m.id, agent, sinceRingMs: Date.now() - Date.parse(m.rung_at) });
     }
     this.onChange();
     const kind = this.doorbellKind(agent);
@@ -725,8 +765,8 @@ export class Engine {
   private async scopeAndCommit(run: Run, task: Task, stage: TaskStage, agent: string, data: HandoffData) {
     const changed = await changedFiles(this.cfg.projectDir);
     const declared = new Set(data.files_changed.map(norm));
-    const others = this.store.tasks(run.id).filter((t) => t.id !== task.id && t.status === "active");
-    const parallel = others.length > 0;
+    const parallel = this.store.tasks(run.id).some((t) => t.id !== task.id && t.status === "active");
+    const review = !!data.verdict || stage.id === "review";
     const leases = this.activeLeases();
     const mine = (l: Lease) => l.task_id === task.id || (l.agent === agent && (l.task_id === null || l.task_id === task.id));
     const otherLeases = leases.filter((l) => !mine(l));
@@ -734,15 +774,15 @@ export class Engine {
     const holderOf = (f: string) => otherLeases.find((l) => inGlob(l.glob, f));
     const scope_notes: string[] = [];
 
-    let toCommit: string[] | null = null; // null = commit everything (no parallel task)
+    let toCommit: string[] | null = null; // legacy unscoped pipeline handoff
     let considered = changed;
-    if (parallel) {
+    if (parallel || ownGlobs.length || review) {
       const taken: string[] = [];
       const outside: string[] = [];
       toCommit = [];
       for (const f of changed) {
         const holder = holderOf(f);
-        const ownsIt = declared.has(norm(f)) || ownGlobs.some((g) => inGlob(g, f));
+        const ownsIt = declared.has(norm(f)) || (!review && ownGlobs.some((g) => inGlob(g, f)));
         if (holder) {
           if (declared.has(norm(f))) taken.push(`${f}（${holder.agent}${holder.task_id ? "/" + this.store.task(holder.task_id)?.key : ""}）`);
         } else if (ownsIt) toCommit.push(f);
@@ -750,10 +790,10 @@ export class Engine {
       }
       considered = toCommit;
       if (taken.length) scope_notes.push(`声明的文件属于其他任务的租约，没有提交：${taken.join("、")}`);
-      if (outside.length) scope_notes.push(`有改动不在本任务范围、也没在交接单里声明，没有提交（可能是并行任务做到一半的改动）：${outside.join("、")}`);
-    } else if (task.paths.length) {
-      const outside = changed.filter((f) => !task.paths.some((g) => inGlob(g, f)) && !declared.has(norm(f)));
-      if (outside.length) scope_notes.push(`改动了任务范围（${task.paths.join("、")}）以外的文件：${outside.join("、")}`);
+      if (outside.length) {
+        const why = review ? "审查交接未声明这些改动" : "改动不在本任务范围、也没在交接单里声明";
+        scope_notes.push(`${why}，没有提交：${outside.join("、")}`);
+      }
     }
     const undeclared = data.files_changed.length ? considered.filter((f) => !declared.has(norm(f))) : [];
     if (undeclared.length) scope_notes.push(`改动了但没在交接单里声明：${undeclared.join("、")}`);
@@ -1391,9 +1431,11 @@ export class Engine {
     const handoffs = run ? this.store.handoffs(run.id) : [];
     const tasks = run ? this.store.tasks(run.id) : [];
     const keyOf = (id: number | null) => (id ? tasks.find((t) => t.id === id)?.key ?? null : null);
+    let codexWake: string | undefined;
     const agents = this.agentIds().map((id) => {
       const p = this.presence.get(id)!;
       const pending = this.store.mailByStatus(id, [...LIVE_MAIL]);
+      if (!codexWake && pending.some((m) => this.codexWakeAlerts.has(m.id))) codexWake = id;
       const unacked = this.store.mailByStatus(id, ["fetched"]).filter((m) => m.ack_required);
       return {
         id,
@@ -1421,6 +1463,7 @@ export class Engine {
     let attention: { kind: "fallback" | "stale"; agent: string; message: string } | null = null;
     const stuck = agents.find((a) => a.stuckMail > 0);
     if (stuck) attention = { kind: "fallback", agent: stuck.id, message: `${stuck.id} 没有响应门铃，有 ${stuck.stuckMail} 封信送不到。请在 ${stuck.id} 里说「继续」。` };
+    else if (codexWake) attention = { kind: "fallback", agent: codexWake, message: `${codexWake} 已响铃但尚未取信。请在对应对话里说「继续」。` };
     else if (run && (run.status === "active" || run.status === "awaiting_approval"))
       for (const l of lives) {
         if (l.status !== "ready" && l.status !== "in_progress") continue;

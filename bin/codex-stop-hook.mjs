@@ -13,23 +13,24 @@
 // BRIDGE_DOWN_GRACE_SECONDS (default 90): how long to keep retrying while the daemon is unreachable, so
 // restarting the bridge doesn't release a parked Codex. A daemon that never comes back still lets Codex go.
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:7878").replace(/\/$/, "");
 const PARK_MS = Number(process.env.BRIDGE_PARK_SECONDS ?? 600) * 1000;
 const HEARTBEAT = process.env.BRIDGE_HEARTBEAT !== "0";
 const SERVER = process.env.BRIDGE_MCP_NAME ?? "bridge";
 const DOWN_GRACE_MS = Number(process.env.BRIDGE_DOWN_GRACE_SECONDS ?? 90) * 1000;
+const LOG = process.env.BRIDGE_HOOK_LOG ?? path.join(os.tmpdir(), "ai-bridge", "codex-stop-hook.jsonl");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// On Windows, writes to a pipe are asynchronous: exiting right after write() can drop the output, and
-// Codex then sees an empty answer and simply stops. Exit only once the write has been flushed.
-let finished = false;
-const out = (obj) => {
-  if (finished) return new Promise(() => {});
-  finished = true;
-  process.stdout.write(JSON.stringify(obj), () => process.exit(0));
-  return new Promise(() => {}); // park the caller until exit
-};
+function log(event, data) {
+  try {
+    fs.mkdirSync(path.dirname(LOG), { recursive: true });
+    fs.appendFileSync(LOG, JSON.stringify({ t: new Date().toISOString(), pid: process.pid, event, ...data }) + "\n");
+  } catch {} // diagnostics must not interfere with the hook protocol
+}
 
 /** Last agent_id this thread successfully joined as, or null. */
 function joinedAgent(transcriptPath) {
@@ -56,13 +57,26 @@ function joinedAgent(transcriptPath) {
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (input += d));
-process.stdin.on("end", async () => {
-  let ev = {};
+process.stdin.once("end", async () => {
+  let stdin;
   try {
-    ev = JSON.parse(input);
+    stdin = JSON.parse(input);
   } catch {}
+  log("stdin", { stdin: stdin === undefined ? input : stdin });
+  const ev = stdin ?? {};
+  const context = { session_id: ev.session_id, turn_id: ev.turn_id, stop_hook_active: ev.stop_hook_active };
   const agent = joinedAgent(ev.transcript_path);
-  if (!agent) return out({}); // not a bridge worker thread: behave as if there were no hook
+  let parkStarted = null;
+  const out = (output, cause, mailIds) => {
+    const data = { ...context, agent, cause, mailIds, parked_ms: parkStarted === null ? 0 : Math.round(performance.now() - parkStarted), output };
+    log("output", data);
+    // On Windows, exiting before the pipe write completes can drop the block response.
+    process.stdout.write(JSON.stringify(output), (error) => {
+      log("stdout_complete", { ...context, error: error?.message ?? null });
+      process.exit(error ? 1 : 0);
+    });
+  };
+  if (!agent) return out({}, "not_joined");
 
   // The daemon may be restarting: tolerate it being unreachable for up to DOWN_GRACE_MS in a row.
   let downSince = null;
@@ -74,6 +88,8 @@ process.stdin.on("end", async () => {
   };
 
   let registered = false;
+  parkStarted = performance.now();
+  log("park", { ...context, agent, park_ms: PARK_MS });
   const start = Date.now();
   while (Date.now() - start < PARK_MS) {
     try {
@@ -88,19 +104,19 @@ process.stdin.on("end", async () => {
       const remaining = Math.ceil((PARK_MS - (Date.now() - start)) / 1000);
       const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=codex-hook&timeout=${Math.max(1, Math.min(50, remaining))}`);
       if (r.status >= 500) throw new Error("HTTP " + r.status);
-      if (!r.ok) return out({}); // e.g. this agent no longer exists in the bridge's config
+      if (!r.ok) return out({}, `doorbell_http_${r.status}`);
       const j = await r.json();
       downSince = null;
-      if (j.ring) return out({ decision: "block", reason: j.text });
+      if (j.ring) return out({ decision: "block", reason: j.text }, "ring", j.mailIds);
     } catch {
       registered = false; // re-register after the daemon comes back (its in-memory state is new)
-      if (await unreachable()) return out({});
+      if (await unreachable()) return out({}, "daemon_unreachable");
     }
   }
   if (HEARTBEAT)
     return out({
       decision: "block",
       reason: "[协作桥] 心跳：暂时没有新信。不要调用任何工具，只回复「待命」两个字，然后结束本回合。",
-    });
-  return out({});
+    }, "heartbeat");
+  return out({}, "park_timeout");
 });

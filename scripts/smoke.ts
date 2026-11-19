@@ -34,7 +34,7 @@ pipeline:
   - { id: implement, role: 编码, agent: codex }
   - { id: review, role: 审查, agent: claude, gate: true, on_reject: implement }
 wait: { poll_seconds: 2, stale_after_seconds: 30, offline_after_seconds: 60 }
-mail: { ring_retry_seconds: 3 }
+mail: { ring_retry_seconds: 12 }
 notify: { enabled: false }
 `,
 );
@@ -43,7 +43,7 @@ let daemon: ChildProcess;
 async function startDaemon() {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", proj, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0" },
+    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_CODEX_WAKE_GRACE_SECONDS: "6" },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -82,14 +82,15 @@ function check(cond: unknown, msg: string) {
 const write = (f: string, s: string) => fs.writeFileSync(path.join(proj, f), s);
 const task = (r: any) => r.mails?.find((m: any) => m.kind === "task" && !m.void)?.task;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const hookLog = path.join(proj, "codex-stop-hook.jsonl");
 
 function runHook(stdin: object, env: Record<string, string>): Promise<{ out: string; ms: number }> {
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const p = spawn(process.execPath, [path.join(ROOT, "bin/codex-stop-hook.mjs")], { env: { ...process.env, BRIDGE_URL: BASE, ...env } });
+    const p = spawn(process.execPath, [path.join(ROOT, "bin/codex-stop-hook.mjs")], { env: { ...process.env, BRIDGE_URL: BASE, BRIDGE_HOOK_LOG: hookLog, ...env } });
     let out = "";
     p.stdout.on("data", (d) => (out += d));
-    p.on("exit", () => resolve({ out, ms: Date.now() - t0 }));
+    p.on("close", () => resolve({ out, ms: Date.now() - t0 }));
     p.stdin.end(JSON.stringify(stdin));
   });
 }
@@ -308,7 +309,12 @@ try {
   await call(codex, "submit_handoff", { agent_id: "codex", summary: "d 完成", files_changed: ["d/one.txt"] });
   t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   check(t?.task?.key === "T1" && t.stage.id === "review" && t.input_handoff?.summary === "a 完成", "codex then gets the T1 review");
-  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "a 没问题", verdict: "approve" });
+  write("IMPORTANT.md", "用户的反馈\n");
+  sh("add", "--", "IMPORTANT.md");
+  write("a/one.txt", "a (local change left in the review scope)\n");
+  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "a 没问题", verdict: "approve", files_changed: [] });
+  check(/^[0-9a-f]{40}$/.test(sub.commit) && sh("diff-tree", "-r", "--no-commit-id", "--name-only", sub.commit) === "", "last active task's review commits an empty tree diff");
+  check(sh("diff", "--cached", "--name-only") === "IMPORTANT.md" && sh("diff", "--name-only") === "a/one.txt", "empty review preserves both a staged user file and an unstaged file in its task scope");
   s = await state();
   const gate = s.lives.find((x: any) => x.status === "awaiting_approval");
   await api(`/api/attempts/${gate.id}/decide`, { action: "approve", note: "" });
@@ -318,7 +324,9 @@ try {
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(t?.task?.key === "T3" && t.dependencies.length === 2 && t.dependencies.every((d: any) => d.status === "done" && d.commit), "T3 sees its dependencies' results");
   write("c.txt", "c\n");
-  await call(claude, "submit_handoff", { agent_id: "claude", summary: "合并完成", files_changed: ["c.txt"] });
+  sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "合并完成" });
+  check(/^[0-9a-f]{40}$/.test(sub.commit) && sh("diff-tree", "-r", "--no-commit-id", "--name-only", sub.commit) === "c.txt", "last active implementation commits only its task paths");
+  check(sh("diff", "--cached", "--name-only") === "IMPORTANT.md" && sh("diff", "--name-only") === "a/one.txt", "scoped implementation leaves unrelated staged and unstaged changes intact");
   s = await state();
   check(s.run.status === "done" && s.tasks.every((x: any) => x.status === "done"), "all tasks done → run done");
   check(sh("log", "--format=%s", "-1").includes("T3"), "multi-task commits are labelled with the task key");
@@ -363,6 +371,21 @@ try {
   check(pi.mails[0]?.body.includes("该干活了"), "agent fetches the mail through the proxy");
   await proxy.close();
   pipe.close();
+  check(!(await state()).agents.find((a: any) => a.id === "pbot").binding, "closing proxy stdin deletes its MCP session and releases its identity");
+
+  // Codex uses the same stdio proxy without the Claude socket. A fresh proxy must join without takeover.
+  const proxyEnv = { ...process.env, BRIDGE_URL: BASE } as Record<string, string>;
+  delete proxyEnv.CLAUDE_CODE_MESSAGING_SOCKET;
+  delete proxyEnv.CLAUDE_CODE_MESSAGING_TOKEN;
+  for (const name of ["fake-codex", "restarted-codex"]) {
+    const client = new Client({ name, version: "0" });
+    await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, "bin/bridge-mcp.mjs")], env: proxyEnv }));
+    try {
+      check((await call(client, "join", { agent_id: "pbot" })).agent_id === "pbot", `${name} joins without takeover`);
+    } finally {
+      await client.close();
+    }
+  }
 
   // ===== C: Codex Stop hook as the doorbell =====
   console.log("— C: Codex Stop hook");
@@ -377,18 +400,60 @@ try {
   check(h.out === "{}" && h.ms < 3000, `thread that never joined is released immediately (${h.ms} ms)`);
 
   fs.writeFileSync(tx, joinLine("hbot") + "\n");
-  const parked = runHook({ session_id: "s-1", transcript_path: tx }, { BRIDGE_PARK_SECONDS: "20" });
+  const hookInput = { session_id: "s-1", transcript_path: tx, turn_id: "t-1", stop_hook_active: true, last_assistant_message: "待命", future_field: { value: 42 } };
+  const parked = runHook(hookInput, { BRIDGE_PARK_SECONDS: "20" });
   await sleep(1500);
   s = await state();
   check(s.agents.find((a: any) => a.id === "hbot").doorbellArmed && s.codexThreads.some((x: any) => x.session_id === "s-1"), "joined thread parks and registers");
-  await api("/api/mail", { to: "hbot", text: "新任务" });
+  const rangAt = Date.now();
+  const ringMail = await api("/api/mail", { to: "hbot", text: "新任务" });
   h = await parked;
   const hj = JSON.parse(h.out);
   check(hj.decision === "block" && /fetch_inbox/.test(hj.reason) && h.ms < 5000, `mail → block with wake-up reason (${h.ms} ms)`);
+  const trace = fs.readFileSync(hookLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const stdinEntry = trace.find((entry) => entry.event === "stdin" && entry.stdin.session_id === hookInput.session_id);
+  const hookEvents = trace.filter((entry) => entry.pid === stdinEntry?.pid);
+  const outputEntry = hookEvents.find((entry) => entry.event === "output");
+  check(JSON.stringify(stdinEntry?.stdin) === JSON.stringify(hookInput), "hook logs all stdin fields, including stop_hook_active, turn_id and unknown fields");
+  check(outputEntry?.cause === "ring" && outputEntry.mailIds.includes(ringMail.json.id) && outputEntry.parked_ms > 0 && JSON.stringify(outputEntry.output) === h.out && hookEvents.some((entry) => entry.event === "stdout_complete" && entry.error === null), "hook log correlates parking duration and flushed stdout with the rung mail");
 
-  // A fresh agent so the unfetched mail above (re-rung by the sweep) cannot interfere.
   const tx2 = path.join(proj, "rollout2.jsonl");
   fs.writeFileSync(tx2, joinLine("hbot2") + "\n");
+  const fetching = await connect("fetching-codex");
+  await call(fetching, "join", { agent_id: "hbot2" });
+  const healthy = runHook({ session_id: "s-healthy", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "20" });
+  await sleep(700);
+  const healthyMail = await api("/api/mail", { to: "hbot2", text: "按铃后马上取信" });
+  check(JSON.parse((await healthy).out).decision === "block", "second Codex hook receives its ring");
+  check((await call(fetching, "fetch_inbox", { agent_id: "hbot2" })).mails.some((m: any) => m.id === healthyMail.json.id), "healthy Codex fetches its rung mail");
+
+  for (let i = 0; i < 100 && Date.now() - rangAt < 10_500; i++) {
+    s = await state();
+    if (s.attention?.agent === "hbot") break;
+    await sleep(100);
+  }
+  check(s.attention?.agent === "hbot" && s.attention.message.includes("尚未取信") && s.mail.find((m: any) => m.id === ringMail.json.id)?.status === "rung", `unfetched hook ring triggers a panel warning before sweep (${Date.now() - rangAt} ms)`);
+  const manual = await connect("manual-codex");
+  await call(manual, "join", { agent_id: "hbot" });
+  check((await call(manual, "fetch_inbox", { agent_id: "hbot" })).mails.some((m: any) => m.id === ringMail.json.id), "manual recovery can still fetch the pending mail");
+  await sleep(2000); // the healthy ring's own wake-up grace will have expired too
+  s = await state();
+  check(!s.attention && s.events.filter((e: any) => e.kind === "doorbell" && e.text.includes("仍有")).length === 1, "fetch clears the alert and a timely fetch never triggers one");
+  // Woken and working (any tool call after the ring) but slow to fetch: no alert.
+  const busyHook = runHook({ session_id: "s-busy", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "20" });
+  await sleep(700);
+  const busyMail = await api("/api/mail", { to: "hbot2", text: "醒了但先想一会儿" });
+  check(JSON.parse((await busyHook).out).decision === "block", "busy Codex hook receives its ring");
+  await sleep(1000);
+  await call(fetching, "get_context", { agent_id: "hbot2" });
+  await sleep(6500);
+  s = await state();
+  check(!s.attention && !s.events.some((e: any) => e.kind === "doorbell" && e.agent === "hbot2" && e.text.includes("仍有")), "a tool call after the ring suppresses the wake alert");
+  await call(fetching, "fetch_inbox", { agent_id: "hbot2" });
+  check(s.mail.find((m: any) => m.id === busyMail.json.id)?.status === "rung", "slow mail was still waiting, not re-rung away");
+  const deliveryTrace = fs.readFileSync(path.join(proj, ".bridge", "bridge-log.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  check([ringMail.json.id, healthyMail.json.id].every((id) => deliveryTrace.some((entry) => entry.event === "rung_mail_fetched" && entry.id === id)), "bridge log correlates both fetches with their ring and hook output by mail ID");
+
   h = await runHook({ session_id: "s-2", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "2" });
   check(JSON.parse(h.out).reason?.includes("心跳"), "quiet park window → heartbeat block");
   h = await runHook({ session_id: "s-2", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "2", BRIDGE_HEARTBEAT: "0" });
@@ -396,7 +461,7 @@ try {
 
   // Nobody parked: the mail must not sit silently — after ring_retry_seconds it becomes "stuck".
   await api("/api/mail", { to: "hbot3", text: "没人在等" });
-  await sleep(9000);
+  await sleep(17_000);
   s = await state();
   check(s.mail.find((m: any) => m.to === "hbot3")?.status === "stuck" && s.agents.find((a: any) => a.id === "hbot3").stuckMail === 1, "undeliverable mail → stuck + attention banner");
 

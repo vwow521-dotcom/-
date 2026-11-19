@@ -22,13 +22,10 @@ export async function dirtyFiles(cwd: string): Promise<string[]> {
 
 /** Paths (forward slashes, relative to the repo root) with uncommitted changes, including untracked files. */
 export async function changedFiles(cwd: string): Promise<string[]> {
-  const r = await git(cwd, ["-c", "core.quotepath=false", "status", "--porcelain", "-uall"]);
+  // Scope the old and new paths of a rename independently. NULs preserve literal filenames.
+  const r = await git(cwd, ["status", "--porcelain=v1", "-z", "--no-renames", "-uall"]);
   if (!r.ok || !r.out) return [];
-  return r.out.split("\n").map((l) => {
-    let p = l.slice(3);
-    if (p.includes(" -> ")) p = p.split(" -> ")[1];
-    return p.replace(/^"|"$/g, "");
-  });
+  return r.out.split("\0").filter(Boolean).map((entry) => entry.slice(3));
 }
 
 /** Minimal glob: `**` any depth, `*` within a segment, `?` one char. */

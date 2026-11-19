@@ -29,21 +29,26 @@ const log = (msg, data) => {
     fs.appendFileSync(LOG, `${new Date().toISOString()} [pid ${process.pid}] ${msg}${data ? " " + JSON.stringify(data) : ""}\n`);
   } catch {}
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
 
 log("proxy start", { base: BASE, socket: !!SOCK, token: !!TOKEN, entry: process.env.CLAUDE_CODE_ENTRYPOINT ?? null });
 
 // ---------- upstream (daemon) ----------
 let client = null;
+let httpTransport = null;
 let connecting = null;
 let lastJoin = null; // replayed (with takeover) after the daemon restarts
+let closing = false;
 
 async function getClient() {
+  if (closing) throw new Error("stdio is closing");
   if (client) return client;
   if (connecting) return connecting;
   connecting = (async () => {
     const c = new Client({ name: "bridge-stdio-proxy", version: "0.2.0" });
-    await c.connect(new StreamableHTTPClientTransport(new URL(BASE + "/mcp")));
+    httpTransport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"));
+    await c.connect(httpTransport);
+    if (closing) throw new Error("stdio is closing");
     c.onclose = () => {
       if (client === c) client = null;
     };
@@ -65,6 +70,7 @@ async function upstream(fn) {
   try {
     return await fn(await getClient());
   } catch (e) {
+    if (closing) throw e;
     // Session lost (daemon restarted) or daemon down: drop the client and retry once.
     log("upstream error, reconnecting", { error: String(e?.message ?? e) });
     try {
@@ -78,6 +84,7 @@ async function upstream(fn) {
 // ---------- doorbell ----------
 let doorbellAgent = null;
 let ringLoopRunning = false;
+const doorbellAbort = new AbortController();
 
 function inject(text) {
   return new Promise((resolve) => {
@@ -106,21 +113,24 @@ async function ringLoop() {
   if (ringLoopRunning) return;
   ringLoopRunning = true;
   log("doorbell armed", { agent: doorbellAgent });
-  while (doorbellAgent) {
+  while (doorbellAgent && !closing) {
     const agent = doorbellAgent;
     try {
-      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=claude-socket&timeout=50`);
+      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=claude-socket&timeout=50`, { signal: doorbellAbort.signal });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json();
-      if (!j.ring) continue;
+      if (!j.ring || closing) continue;
       const res = await inject(j.text);
+      if (closing) break;
       log("doorbell rang", { agent, mails: j.mailIds, ok: res.ok, error: res.error });
       await fetch(`${BASE}/api/doorbell/result`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ agent, mailIds: j.mailIds, ok: res.ok, error: res.error }),
+        signal: doorbellAbort.signal,
       }).catch(() => {});
     } catch (e) {
+      if (closing) break;
       log("doorbell wait failed", { error: String(e?.message ?? e) });
       await sleep(3000);
     }
@@ -175,8 +185,9 @@ let announcing = false;
 async function waitForDaemonThenAnnounce() {
   if (announcing) return;
   announcing = true;
-  for (;;) {
+  while (!closing) {
     await sleep(5000);
+    if (closing) break;
     try {
       await getClient();
       await server.sendToolListChanged();
@@ -187,10 +198,37 @@ async function waitForDaemonThenAnnounce() {
   announcing = false;
 }
 
+async function shutdown() {
+  if (closing) return;
+  closing = true;
+  doorbellAbort.abort();
+  // A stopped daemon must not keep the proxy alive after its parent has closed stdin.
+  const deadline = setTimeout(() => {
+    log("stdio closed, upstream cleanup timed out");
+    process.exit(0);
+  }, 1500);
+  try {
+    await connecting?.catch(() => {});
+    const session = httpTransport?.sessionId;
+    if (session) {
+      await httpTransport.terminateSession(); // MCP DELETE; the daemon frees this session's bindings
+      log("upstream session terminated", { session });
+    }
+  } catch (e) {
+    log("upstream session termination failed", { error: String(e?.message ?? e) });
+  } finally {
+    await httpTransport?.close();
+    await server.close();
+    clearTimeout(deadline);
+    log("stdio closed, upstream cleanup finished");
+    process.exit(0); // don't let a leftover handle keep an orphaned proxy alive
+  }
+}
+
 const transport = new StdioServerTransport();
-transport.onclose = () => {
-  log("stdio closed, exiting");
-  process.exit(0);
-};
+transport.onclose = shutdown;
+// The SDK's stdio server transport does not call onclose on stdin EOF.
+process.stdin.once("end", shutdown);
+process.stdin.once("close", shutdown);
 await server.connect(transport);
 log("stdio connected");
