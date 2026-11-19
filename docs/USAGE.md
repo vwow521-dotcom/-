@@ -10,10 +10,12 @@
 
 ## 1. 安装（一次）
 
-需要 Node.js 22.13 或更新版本，以及 git。
+需要 Node.js 22.13 或更新版本，以及 Git。参照 [README 的源码安装步骤](../README.md)检出仓库，或直接使用已有的 `.tgz` 安装包。在仓库根目录构建和安装 0.3.0 的命令如下：
 
 ```powershell
-npm install -g E:\Interaction-ai\release\ai-bridge-0.3.0.tgz
+npm ci
+npm pack
+npm install -g .\ai-bridge-0.3.0.tgz
 ai-bridge setup
 ai-bridge doctor
 ```
