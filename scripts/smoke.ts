@@ -1,6 +1,7 @@
 // End-to-end check of the bridge (M2b postman). Spawns its own daemon(s) against a throwaway git project.
 //   npm run smoke
 // A: pipeline over mail with the poll fallback (wait_for_mail), gates, ask_human-as-mail, human mail, dedupe, restart.
+// D: meeting rounds → approved plan → task DAG with parallel tasks, one task per agent at a time, leases, scoped commits.
 // B: stdio proxy as Claude doorbell, writing into a fake CLAUDE_CODE_MESSAGING_SOCKET named pipe.
 // C: Codex Stop hook doorbell against fake transcripts.
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
@@ -99,7 +100,7 @@ try {
   // ===== A: mail flow with the poll fallback =====
   console.log("— A: pipeline over mail (poll fallback)");
   let claude = await connect("claude");
-  const codex = await connect("codex");
+  let codex = await connect("codex");
   const imposter = await connect("imposter");
   const j = await call(claude, "join", { agent_id: "claude" });
   check(j.roles?.length === 2 && j.doorbell === "poll", "claude joined, no doorbell → poll");
@@ -212,6 +213,115 @@ try {
   check(!(await call(intruder, "join", { agent_id: "claude" })).error, "new session joins without takeover after release");
   check(!(await call(intruder, "leave", { agent_id: "claude" })).error && !(await call(claude, "join", { agent_id: "claude" })).error, "leave frees it for the next session");
   await api("/api/runs/stop", {});
+
+  // ===== D: meeting → task DAG, file leases, scoped commits =====
+  console.log("— D: meeting → task DAG, leases, scoped commits");
+  codex = await connect("codex-again"); // its first session died with the daemon restart above
+  await call(codex, "join", { agent_id: "codex" });
+  const meetingOf = (r: any) => r.mails?.find((m: any) => m.kind === "meeting" && !m.void)?.meeting;
+  const mt = await api("/api/meetings", { topic: "拆成并行任务", participants: ["claude", "codex"] });
+  check(mt.status === 200, "meeting started");
+  const mid = mt.json.meeting_id;
+  check((await api("/api/runs", { goal: "x" })).status === 409, "pipeline run refused while a meeting is open");
+  let mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(mm?.kind === "proposal" && mm.round === 1 && mm.meeting_id === mid, "claude invited to round 1 (proposal)");
+  await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "方案 A：按目录拆" });
+  check((await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "again" })).error, "second turn in the same round rejected");
+  check((await state()).meeting.status === "collecting", "meeting waits for codex");
+  mm = meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" }));
+  await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: "方案 B：按功能拆", tasks: [{ id: "T1", title: "草案", owner: "codex" }] });
+  s = await state();
+  check(s.meeting.status === "review" && s.meeting.turns.length === 2, "all proposals in → waits for the human");
+  await api(`/api/meetings/${mid}/next`, { action: "critique", note: "重点看能不能并行" });
+  mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(
+    mm?.kind === "critique" && mm.round === 2 && mm.previous_rounds[0].turns.length === 2 && mm.human_note === "重点看能不能并行",
+    "critique round carries every proposal and the human's note",
+  );
+  await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "同意 B" });
+  await call(codex, "fetch_inbox", { agent_id: "codex" });
+  await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: "同意" });
+  await api(`/api/meetings/${mid}/next`, { action: "finalize", note: "" });
+  check(!meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" })), "final round goes to the facilitator only");
+  mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(mm?.kind === "final", "facilitator gets the final round");
+  const cyc = await call(claude, "submit_meeting_turn", {
+    agent_id: "claude", meeting_id: mid, content: "x",
+    tasks: [{ id: "T1", title: "a", owner: "claude", depends_on: ["T2"] }, { id: "T2", title: "b", owner: "nobody", depends_on: ["T1"] }],
+  });
+  check(cyc.error && cyc.problems.some((p: string) => p.includes("成环")) && cyc.problems.some((p: string) => p.includes("nobody")), "bad plan rejected (cycle, unknown owner)");
+  const plan = [
+    { id: "T1", title: "做 a", description: "写 a/one.txt", owner: "claude", reviewer: "codex", paths: ["a/**"] },
+    { id: "T2", title: "做 b", description: "写 b/one.txt", owner: "codex", paths: ["b/"] },
+    { id: "T4", title: "做 d", description: "写 d/one.txt", owner: "codex", paths: ["d/**"] },
+    { id: "T3", title: "合并", description: "写 c.txt", owner: "claude", depends_on: ["T1", "T2"], paths: ["c.txt"] },
+  ];
+  await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "最终方案：四个任务", decisions: [{ what: "按目录拆", why: "互不干扰" }], tasks: plan });
+  check((await state()).meeting.status === "awaiting_approval", "final plan waits for approval");
+  const appr = await api(`/api/meetings/${mid}/decide`, { action: "approve", note: "注意中文注释" });
+  check(appr.status === 200 && /^doc\/meetings\/\d{4}-\d{2}-\d{2}-拆成并行任务\.md$/.test(appr.json.doc_path), `approved → minutes at ${appr.json.doc_path}`);
+  const minutes = fs.readFileSync(path.join(proj, appr.json.doc_path), "utf8");
+  check(minutes.includes("方案 A") && minutes.includes("| T3 | 合并 |") && minutes.includes("按目录拆 —— 互不干扰"), "minutes hold proposals, decisions and the task table");
+  check(sh("log", "-1", "--format=%s", "--", appr.json.doc_path).includes("会议纪要") && !sh("status", "--porcelain").includes("doc/"), "minutes committed on their own");
+  s = await state();
+  const tk = (k: string) => s.tasks.find((x: any) => x.key === k);
+  check(tk("T1").status === "active" && tk("T2").status === "active" && tk("T4").status === "active" && tk("T3").waiting === "等 T1、T2", "T1/T2/T4 start, T3 waits on its dependencies");
+  check(s.leases.filter((l: any) => !l.released_at).length === 3 && s.leases.some((l: any) => l.glob === "b/**"), "task paths leased (b/ → b/**)");
+
+  t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(t?.task?.key === "T1" && t.stage.id === "implement" && t.task.description.includes("注意中文注释") && t.meeting_minutes === appr.json.doc_path, "claude gets T1 with the approval note and minutes path");
+  let ci = await call(codex, "fetch_inbox", { agent_id: "codex" });
+  const codexTasks = ci.mails.filter((m: any) => m.kind === "task" && !m.void);
+  check(codexTasks.length === 1 && codexTasks[0].task.task.key === "T2", "codex gets only one task at a time (T2, T4 held back)");
+
+  const rc = await call(codex, "reserve_paths", { agent_id: "codex", globs: ["a/one.txt"], reason: "想顺手改" });
+  check(rc.granted === false && rc.conflicts[0].held_by === "claude" && rc.conflicts[0].task === "T1", "lease conflict reports the holder");
+  const conflictMail = (await call(claude, "fetch_inbox", { agent_id: "claude" })).mails.find((m: any) => m.kind === "system");
+  check(conflictMail?.subject.includes("文件冲突"), "holder is told about the conflict");
+  const rs = await call(codex, "reserve_paths", { agent_id: "codex", globs: ["shared/notes.md"], ttl_seconds: 60 });
+  check(rs.granted === true, "free path reserved");
+
+  fs.mkdirSync(path.join(proj, "a"), { recursive: true });
+  fs.mkdirSync(path.join(proj, "b"), { recursive: true });
+  fs.mkdirSync(path.join(proj, "d"), { recursive: true });
+  write("a/one.txt", "a (half done by claude)\n");
+  write("b/one.txt", "b\n");
+  write("stray.txt", "nobody's\n");
+  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "b 完成", files_changed: ["b/one.txt"] });
+  const t2files = sh("show", "--name-only", "--format=", sub.commit).split("\n").filter(Boolean);
+  check(t2files.length === 1 && t2files[0] === "b/one.txt", `parallel commit holds only the task's files (${t2files.join(",")})`);
+  check(sub.scope_notes.some((n: string) => n.includes("stray.txt")) && !sub.scope_notes.some((n: string) => n.includes("a/one.txt")), "stray file noted, the other task's leased file silently left alone");
+  check(sh("status", "--porcelain", "-uall").includes("a/one.txt"), "claude's in-flight file still uncommitted");
+  fs.rmSync(path.join(proj, "stray.txt"));
+  s = await state();
+  check(tk("T2").status === "done" && tk("T3").status === "pending" && tk("T3").waiting === "等 T1", "T2 done (no reviewer), T3 still waits for T1");
+
+  t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
+  check(t?.task?.key === "T4", "codex free → T4 delivered");
+  write("a/one.txt", "a\n");
+  sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "a 完成", files_changed: ["a/one.txt"] });
+  check(sub.next === "codex/review", "T1 implement → review by codex");
+  s = await state();
+  const reviewAttempt = s.lives.find((x: any) => x.stage_id === "review");
+  check(reviewAttempt && !s.mail.some((m: any) => m.kind === "task" && m.to === "codex" && m.status === "queued"), "review of T1 held while codex works on T4");
+  write("d/one.txt", "d\n");
+  await call(codex, "submit_handoff", { agent_id: "codex", summary: "d 完成", files_changed: ["d/one.txt"] });
+  t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
+  check(t?.task?.key === "T1" && t.stage.id === "review" && t.input_handoff?.summary === "a 完成", "codex then gets the T1 review");
+  sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "a 没问题", verdict: "approve" });
+  s = await state();
+  const gate = s.lives.find((x: any) => x.status === "awaiting_approval");
+  await api(`/api/attempts/${gate.id}/decide`, { action: "approve", note: "" });
+  s = await state();
+  check(tk("T1").status === "done" && tk("T3").status === "active", "T1 approved → T3 starts");
+  check(!s.leases.some((l: any) => l.task === "T1" || l.task === "T2"), "finished tasks' leases released");
+  t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+  check(t?.task?.key === "T3" && t.dependencies.length === 2 && t.dependencies.every((d: any) => d.status === "done" && d.commit), "T3 sees its dependencies' results");
+  write("c.txt", "c\n");
+  await call(claude, "submit_handoff", { agent_id: "claude", summary: "合并完成", files_changed: ["c.txt"] });
+  s = await state();
+  check(s.run.status === "done" && s.tasks.every((x: any) => x.status === "done"), "all tasks done → run done");
+  check(sh("log", "--format=%s", "-1").includes("T3"), "multi-task commits are labelled with the task key");
 
   // ===== B: stdio proxy as the Claude doorbell =====
   console.log("— B: stdio proxy → fake Claude messaging pipe");

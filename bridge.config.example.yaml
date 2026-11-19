@@ -22,6 +22,24 @@ pipeline:
     gate: true
     on_reject: implement
     instructions: 对照验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+# task_template: 会议定稿后，每个任务按这组阶段走。agent 写 owner（任务负责人）、reviewer（任务审查人）或固定的身份。
+# 没有审查人的任务会跳过 agent 为 reviewer 的阶段。
+task_template:
+  - id: implement
+    role: 实现
+    agent: owner
+    instructions: 按任务描述和会议纪要实现，只改本任务 paths 范围内的文件，并自己验证一遍。
+  - id: review
+    role: 审查
+    agent: reviewer
+    gate: true
+    on_reject: implement
+    instructions: 对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+meetings:
+  dir: doc/meetings           # 会议纪要写到这里，定稿时自动提交
+  # facilitator: claude       # 负责写定稿和任务清单的成员，默认 agents 里的第一个
+leases:
+  default_ttl_seconds: 3600   # reserve_paths 不指定 ttl 时的租约时长；任务自带的租约在任务结束时释放
 wait:
   poll_seconds: 50            # wait_for_mail 单次最长阻塞秒数，需小于客户端工具超时
   stale_after_seconds: 90     # 超过这么久没动静 → 面板显示“可能断网”
@@ -33,5 +51,5 @@ mail:
 notify:
   enabled: true               # Windows 通知
 git:
-  auto_commit: true           # 每次交接自动 git add -A + commit
+  auto_commit: true           # 每次交接自动提交。只有一个任务在进行时提交全部改动；有并行任务时只提交本任务范围内的文件
   commit_reviews: true        # 审查没改文件也生成一个空提交，git log 里能看到审查结论

@@ -44,6 +44,24 @@ export function globMatch(glob: string, file: string): boolean {
   return new RegExp(`^${re}$`, "i").test(file);
 }
 
+/** Normalise a lease glob: forward slashes, no leading ./, a trailing / means the whole directory. */
+export function normGlob(g: string) {
+  let x = g.trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (x.endsWith("/")) x += "**";
+  return x;
+}
+
+/** Could some file match both globs? Exact for literal paths; conservative (prefix check) when both have wildcards. */
+export function globsOverlap(a: string, b: string): boolean {
+  const A = normGlob(a), B = normGlob(b);
+  if (globMatch(A, B) || globMatch(B, A)) return true;
+  const lit = (g: string) => g.split(/[*?]/)[0].toLowerCase();
+  const wa = /[*?]/.test(A), wb = /[*?]/.test(B);
+  if (!wa || !wb) return false;
+  const pa = lit(A), pb = lit(B);
+  return pa.startsWith(pb) || pb.startsWith(pa);
+}
+
 export type CommitResult = { sha: string } | { error: string } | { skipped: string };
 
 /** Stage everything and commit. No changes → skipped, unless allowEmpty (review conclusions). */
@@ -55,6 +73,24 @@ export async function commitAll(cwd: string, subject: string, body: string, opts
   if (staged.ok && !opts.allowEmpty) return { skipped: "没有文件改动" };
   const c = await git(cwd, ["commit", ...(staged.ok ? ["--allow-empty"] : []), "-m", subject, "-m", body]);
   if (!c.ok) return { error: "git commit 失败：" + c.out };
+  const sha = await git(cwd, ["rev-parse", "HEAD"]);
+  return sha.ok ? { sha: sha.out } : { error: sha.out };
+}
+
+/** Commit only `paths` (staging their additions and deletions), leaving everything else in the index and
+ *  work tree alone. No paths and allowEmpty → an empty commit that ignores whatever else is staged. */
+export async function commitPaths(cwd: string, paths: string[], subject: string, body: string, opts: { allowEmpty?: boolean } = {}): Promise<CommitResult> {
+  if (!(await isRepo(cwd))) return { skipped: "不是 git 仓库" };
+  if (!paths.length) {
+    if (!opts.allowEmpty) return { skipped: "本任务范围内没有文件改动" };
+    const c = await git(cwd, ["commit", "--only", "--allow-empty", "-m", subject, "-m", body]);
+    if (!c.ok) return { error: "git commit 失败：" + c.out };
+  } else {
+    const add = await git(cwd, ["add", "-A", "--", ...paths]);
+    if (!add.ok) return { error: "git add 失败：" + add.out };
+    const c = await git(cwd, ["commit", "--only", ...(opts.allowEmpty ? ["--allow-empty"] : []), "-m", subject, "-m", body, "--", ...paths]);
+    if (!c.ok) return /nothing to commit|no changes added/i.test(c.out) ? { skipped: "本任务范围内没有文件改动" } : { error: "git commit 失败：" + c.out };
+  }
   const sha = await git(cwd, ["rev-parse", "HEAD"]);
   return sha.ok ? { sha: sha.out } : { error: sha.out };
 }

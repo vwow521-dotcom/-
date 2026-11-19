@@ -6,7 +6,7 @@ import type { Engine } from "./engine.js";
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
 
 export function buildServer(engine: Engine): McpServer {
-  const server = new McpServer({ name: "ai-bridge", version: "0.2.0" });
+  const server = new McpServer({ name: "ai-bridge", version: "0.4.0" });
   const ids = engine.agentIds().join(", ");
   const agentId = z.string().describe(`你的身份，可选：${ids}`);
 
@@ -28,7 +28,7 @@ export function buildServer(engine: Engine): McpServer {
     "fetch_inbox",
     {
       title: "取信",
-      description: "取走你所有未读的信（任务、用户消息、问题答复、其他成员的来信）。被「[协作桥]」消息叫醒后调用。",
+      description: "取走你所有未读的信（任务、会议发言邀请、用户消息、问题答复、其他成员的来信）。被「[协作桥]」消息叫醒后调用。",
       inputSchema: { agent_id: agentId },
     },
     async ({ agent_id }, extra) => text(engine.fetchInbox(agent_id, extra.sessionId)),
@@ -84,7 +84,7 @@ export function buildServer(engine: Engine): McpServer {
     "get_context",
     {
       title: "获取任务上下文",
-      description: "获取当前任务的目标、本轮反馈、各阶段状态、最近几份交接单（更早的只给一句摘要）和共享笔记。需要比任务信更多的背景时调用。",
+      description: "获取当前任务的目标、你手上的任务、本轮反馈、各任务和阶段状态、最近几份交接单（更早的只给一句摘要）、文件租约、会议纪要位置和共享笔记。需要比任务信更多的背景时调用。",
       inputSchema: { agent_id: agentId, last_n: z.number().int().min(0).max(50).optional().describe("返回最近几份完整交接单，默认 3") },
     },
     async ({ agent_id, last_n }, extra) => text(engine.getContext(agent_id, extra.sessionId, last_n ?? 3)),
@@ -144,7 +144,7 @@ export function buildServer(engine: Engine): McpServer {
     "submit_handoff",
     {
       title: "提交交接单",
-      description: "完成本阶段后调用，提交结构化交接单。桥会自动 git 提交、确认任务信并推进流水线。",
+      description: "完成本阶段后调用，提交结构化交接单。桥会自动 git 提交（有并行任务时只提交本任务范围内和你声明的文件）、确认任务信并推进流程。",
       inputSchema: {
         agent_id: agentId,
         summary: z.string().describe("一句话：本阶段做了什么"),
@@ -159,9 +159,65 @@ export function buildServer(engine: Engine): McpServer {
         verdict: z.enum(["approve", "reject"]).optional().describe("仅审查阶段：approve 通过 / reject 打回"),
         review_comments: z.array(z.string()).optional().describe("仅审查阶段：必须修改的阻塞问题"),
         observations: z.array(z.string()).optional().describe("仅审查阶段：不影响通过的建议（非阻塞）"),
+        task_id: z.string().optional().describe("可选：任务编号（如 T2）。你同时有多个进行中的任务时用来指明提交哪一个"),
       },
     },
-    async ({ agent_id, ...data }, extra) => text(await engine.submitHandoff(agent_id, extra.sessionId, data)),
+    async ({ agent_id, task_id, ...data }, extra) => text(await engine.submitHandoff(agent_id, extra.sessionId, data, task_id)),
+  );
+
+  const planned = z.object({
+    id: z.string().describe("任务编号，如 T1"),
+    title: z.string(),
+    description: z.string().default("").describe("要做什么、验收标准"),
+    owner: z.string().describe(`负责人，可选：${ids}`),
+    reviewer: z.string().nullable().optional().describe("审查人（可选，留空则不审查）"),
+    depends_on: z.array(z.string()).default([]).describe("依赖的任务编号"),
+    paths: z.array(z.string()).default([]).describe("预计改动的文件 glob，如 src/ui/**；并行任务之间不要重叠"),
+  });
+
+  server.registerTool(
+    "submit_meeting_turn",
+    {
+      title: "会议发言",
+      description: "在会议的当前一轮（提案 / 互评 / 定稿）提交你的发言。meeting 信里会说明本轮要写什么。定稿轮必须带 tasks。会自动确认这封会议信。",
+      inputSchema: {
+        agent_id: agentId,
+        meeting_id: z.number().int(),
+        content: z.string().describe("你的发言：方案、评价或最终方案（Markdown）"),
+        decisions: z.array(z.object({ what: z.string(), why: z.string() })).optional().describe("定稿轮：关键决策及理由"),
+        tasks: z.array(planned).optional().describe("提案轮可选（任务拆分草案）；定稿轮必填（最终任务清单）"),
+      },
+    },
+    async ({ agent_id, meeting_id, content, decisions, tasks }, extra) =>
+      text(engine.submitMeetingTurn(agent_id, extra.sessionId, meeting_id, content, tasks, decisions ?? [])),
+  );
+
+  server.registerTool(
+    "reserve_paths",
+    {
+      title: "申请文件租约",
+      description:
+        "多个任务并行时，改动本任务范围以外的文件之前调用，申请这些文件的租约。和别人的租约冲突时不会授予，会返回占用者，并通知对方。再次调用同样的 glob 即续期。",
+      inputSchema: {
+        agent_id: agentId,
+        globs: z.array(z.string()).min(1).describe("文件路径或 glob，如 src/api/** 、README.md；以 / 结尾表示整个目录"),
+        exclusive: z.boolean().optional().describe("默认 true（独占）；只读或只追加时可设 false（共享）"),
+        ttl_seconds: z.number().int().positive().max(86400).optional().describe(`租约时长，默认 ${engine.cfg.leases.default_ttl_seconds} 秒`),
+        reason: z.string().optional().describe("一句话：为什么要改这些文件"),
+      },
+    },
+    async ({ agent_id, globs, exclusive, ttl_seconds, reason }, extra) =>
+      text(engine.reservePaths(agent_id, extra.sessionId, globs, exclusive ?? true, ttl_seconds, reason ?? "")),
+  );
+
+  server.registerTool(
+    "release_paths",
+    {
+      title: "释放文件租约",
+      description: "提前释放你用 reserve_paths 申请的租约（不填 globs 则全部释放）。任务自带的租约在任务结束时自动释放。",
+      inputSchema: { agent_id: agentId, globs: z.array(z.string()).optional() },
+    },
+    async ({ agent_id, globs }, extra) => text(engine.releasePaths(agent_id, extra.sessionId, globs)),
   );
 
   return server;

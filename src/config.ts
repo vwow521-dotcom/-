@@ -16,6 +16,24 @@ const StageSchema = z.object({
   owns: z.array(z.string()).optional(),
 });
 
+const DEFAULT_TASK_TEMPLATE = [
+  {
+    id: "implement",
+    role: "实现",
+    agent: "owner",
+    gate: false,
+    instructions: "按任务描述和会议纪要实现，只改本任务 paths 范围内的文件，并自己验证一遍。",
+  },
+  {
+    id: "review",
+    role: "审查",
+    agent: "reviewer",
+    gate: true,
+    on_reject: "implement",
+    instructions: "对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。",
+  },
+];
+
 const ConfigSchema = z
   .object({
     project: z.string().optional(),
@@ -31,6 +49,18 @@ const ConfigSchema = z
         .default({ doorbell: "auto" }),
     ),
     pipeline: z.array(StageSchema).min(1),
+    // Stages every meeting-planned task runs. agent: "owner" / "reviewer" (from the task) or a fixed agent id.
+    // Stages whose agent is "reviewer" are skipped for tasks without a reviewer.
+    task_template: z.array(StageSchema).min(1).default(DEFAULT_TASK_TEMPLATE),
+    meetings: z
+      .object({
+        dir: z.string().default("doc/meetings"), // where minutes are written (relative to the project)
+        facilitator: z.string().optional(), // writes the final plan; default: first agent
+      })
+      .default({ dir: "doc/meetings" }),
+    leases: z
+      .object({ default_ttl_seconds: z.number().positive().default(3600) }) // reserve_paths without ttl
+      .default({ default_ttl_seconds: 3600 }),
     wait: z
       .object({
         poll_seconds: z.number().positive().default(50),
@@ -64,6 +94,17 @@ const ConfigSchema = z
     }
     for (const s of c.pipeline)
       if (s.on_reject && !ids.has(s.on_reject)) ctx.addIssue({ code: "custom", message: `stage ${s.id} 的 on_reject「${s.on_reject}」不存在` });
+    const tids = new Set<string>();
+    for (const s of c.task_template) {
+      if (tids.has(s.id)) ctx.addIssue({ code: "custom", message: `task_template 的 stage id 重复：${s.id}` });
+      tids.add(s.id);
+      if (!["owner", "reviewer"].includes(s.agent) && !(s.agent in c.agents))
+        ctx.addIssue({ code: "custom", message: `task_template 的 stage ${s.id} 的 agent「${s.agent}」应为 owner、reviewer 或 agents 里的身份` });
+    }
+    for (const s of c.task_template)
+      if (s.on_reject && !tids.has(s.on_reject)) ctx.addIssue({ code: "custom", message: `task_template 的 stage ${s.id} 的 on_reject「${s.on_reject}」不存在` });
+    if (c.meetings.facilitator && !(c.meetings.facilitator in c.agents))
+      ctx.addIssue({ code: "custom", message: `meetings.facilitator「${c.meetings.facilitator}」不在 agents 里` });
   });
 
 export type Stage = z.infer<typeof StageSchema>;
@@ -89,6 +130,19 @@ pipeline:
     gate: true
     on_reject: implement
     instructions: 对照验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+task_template:
+  - id: implement
+    role: 实现
+    agent: owner
+    instructions: 按任务描述和会议纪要实现，只改本任务 paths 范围内的文件，并自己验证一遍。
+  - id: review
+    role: 审查
+    agent: reviewer
+    gate: true
+    on_reject: implement
+    instructions: 对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
+meetings:
+  dir: doc/meetings
 `;
 
 export function loadConfig(projectDir: string): Config {

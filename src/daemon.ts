@@ -127,6 +127,23 @@ app.post("/api/attempts/:id/decide", (req, res) => {
   if (action !== "approve" && action !== "reject") return void res.status(400).json({ error: "action 必须是 approve 或 reject" });
   reply(res, engine.decide(Number(req.params.id), action, String(req.body?.note ?? "")));
 });
+app.post("/api/meetings", (req, res) => {
+  const topic = String(req.body?.topic ?? "").trim();
+  if (!topic) return void res.status(400).json({ error: "议题不能为空" });
+  const parts = Array.isArray(req.body?.participants) ? req.body.participants.map(String) : undefined;
+  reply(res, engine.startMeeting(topic, parts, req.body?.facilitator ? String(req.body.facilitator) : undefined));
+});
+app.post("/api/meetings/:id/next", (req, res) => {
+  const action = req.body?.action;
+  if (action !== "critique" && action !== "finalize") return void res.status(400).json({ error: "action 必须是 critique 或 finalize" });
+  reply(res, engine.meetingNext(Number(req.params.id), action, String(req.body?.note ?? "")));
+});
+app.post("/api/meetings/:id/decide", async (req, res) => {
+  const action = req.body?.action;
+  if (action !== "approve" && action !== "reject") return void res.status(400).json({ error: "action 必须是 approve 或 reject" });
+  reply(res, await engine.meetingDecide(Number(req.params.id), action, String(req.body?.note ?? "")));
+});
+app.post("/api/meetings/:id/cancel", (req, res) => reply(res, engine.meetingCancel(Number(req.params.id))));
 app.post("/api/questions/:id/answer", (req, res) => {
   const answer = String(req.body?.answer ?? "").trim();
   if (!answer) return void res.status(400).json({ error: "回答不能为空" });

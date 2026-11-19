@@ -25,8 +25,10 @@ a{color:var(--acc)}
 </style></head><body><main>
 <div class="row"><h1 class="grow">AI Bridge</h1><small id="proj"></small></div>
 <div id="banner"></div>
-<div class="card" id="taskcard"><div class="row"><textarea id="goal" data-keep rows="2" class="grow" placeholder="输入新目标，例如：给 playground 的猜数字游戏加一个难度选项"></textarea></div>
-<div class="row" style="margin-top:8px"><button class="primary" onclick="startRun()">开始</button><button class="danger" id="stopbtn" onclick="stopRun()">停止当前任务</button><span class="err" id="taskerr"></span></div></div>
+<div class="card" id="taskcard"><div class="row"><textarea id="goal" data-keep rows="2" class="grow" placeholder="输入新目标或议题，例如：给 playground 的猜数字游戏加一个难度选项"></textarea></div>
+<div class="row" style="margin-top:8px"><button class="primary" onclick="startRun()" title="按配置里的流水线（规划 → 编码 → 审查）一步步做">开始（流水线）</button>
+<button onclick="startMeeting()" title="先让成员各自提案、互评，定稿出任务清单后再并行分派">开会讨论</button><span id="parts" class="mute"></span>
+<button class="danger" id="stopbtn" onclick="stopRun()">停止当前任务</button><span class="err" id="taskerr"></span></div></div>
 <div id="app"></div>
 </main>
 <script>
@@ -54,6 +56,27 @@ async function startRun() {
 async function stopRun() {
   if (!confirm("停止当前任务？进行中的阶段会被取消。")) return;
   try { await post("/api/runs/stop"); } catch (e) { $("#taskerr").textContent = e.message; }
+  load();
+}
+async function startMeeting() {
+  $("#taskerr").textContent = "";
+  const participants = [...document.querySelectorAll("#parts input:checked")].map((el) => el.value);
+  try { await post("/api/meetings", { topic: $("#goal").value, participants }); $("#goal").value = ""; } catch (e) { $("#taskerr").textContent = e.message; }
+  load();
+}
+async function meetingNext(id, action) {
+  const note = (document.getElementById("mnote-" + id) || {}).value || "";
+  try { await post("/api/meetings/" + id + "/next", { action, note }); } catch (e) { alert(e.message); }
+  load();
+}
+async function meetingDecide(id, action) {
+  const note = (document.getElementById("mnote-" + id) || {}).value || "";
+  try { await post("/api/meetings/" + id + "/decide", { action, note }); } catch (e) { alert(e.message); }
+  load();
+}
+async function meetingCancel(id) {
+  if (!confirm("取消这个会议？")) return;
+  try { await post("/api/meetings/" + id + "/cancel"); } catch (e) { alert(e.message); }
   load();
 }
 async function decide(id, action) {
@@ -93,17 +116,86 @@ function handoffBody(h) {
     "<div><small>" + (h.commit_sha ? '提交 <a href="/api/commits/' + h.commit_sha + '" target="_blank">' + h.commit_sha.slice(0, 8) + "</a>" : esc(h.commit_error || "")) + "</small></div>";
 }
 
+const kindText = { proposal: "提案", critique: "互评", final: "定稿" };
+const meetingStatus = { collecting: "发言中", review: "等你决定下一步", awaiting_approval: "定稿待批准", done: "已定稿", cancelled: "已取消" };
+function planTable(tasks) {
+  return '<table><tr><th>编号</th><th>任务</th><th>负责</th><th>审查</th><th>依赖</th><th>文件范围</th></tr>' +
+    tasks.map((x) => "<tr><td>" + esc(x.id) + "</td><td><b>" + esc(x.title) + "</b>" + (x.description ? '<br><small class="mute">' + esc(x.description) + "</small>" : "") +
+      "</td><td>" + esc(x.owner) + "</td><td>" + esc(x.reviewer || "—") + "</td><td>" + esc((x.depends_on || []).join("、") || "—") +
+      "</td><td><small>" + esc((x.paths || []).join("、") || "—") + "</small></td></tr>").join("") + "</table>";
+}
+function meetingCard(m) {
+  const rounds = {};
+  for (const x of m.turns) (rounds[x.round] = rounds[x.round] || []).push(x);
+  const spoken = (rounds[m.round] || []).map((x) => x.agent);
+  const open = ["collecting", "review", "awaiting_approval"].includes(m.status);
+  let h = '<div class="card" style="border-color:var(--acc)"><div class="row"><h2 class="grow">会议 #' + m.id + "：" + esc(m.topic) + "</h2>" +
+    '<span class="chip">' + (meetingStatus[m.status] || m.status) + "</span></div>" +
+    "<div><small>参会：" + esc(m.participants.join("、")) + " · 定稿：" + esc(m.facilitator) + (open ? " · 第 " + m.round + " 轮（" + kindText[m.round_kind] + "）" : "") +
+    (m.doc_path ? " · 纪要 <code>" + esc(m.doc_path) + "</code>" : "") + "</small></div>";
+  if (m.status === "collecting")
+    h += '<div style="margin:6px 0"><small>本轮发言：' + m.expected.map((a) => esc(a) + (spoken.includes(a) ? ' <span class="s-working">✓</span>' : ' <span class="mute">…</span>')).join("　") + "</small></div>";
+  if (m.round_note && open) h += '<div><small class="mute">你对本轮的意见：' + esc(m.round_note) + "</small></div>";
+  const nums = Object.keys(rounds).map(Number).sort((a, b) => a - b);
+  for (const r of nums) {
+    const last = r === nums[nums.length - 1];
+    h += "<details" + (last && open ? " open" : "") + "><summary><b>第 " + r + " 轮：" + kindText[rounds[r][0].kind] + "</b> <small>（" + rounds[r].length + " 人）</small></summary>" +
+      rounds[r].map((x) => '<div style="padding:6px 0 6px 10px;border-left:3px solid var(--line);margin:6px 0"><b>' + esc(x.agent) + '</b><div style="white-space:pre-wrap">' + esc(x.content) + "</div>" +
+        (x.decisions && x.decisions.length ? "<div class=mute>关键决策</div>" + list(x.decisions.map((d) => d.what + " —— " + d.why)) : "") +
+        (x.tasks && x.tasks.length ? "<div class=mute>" + (x.kind === "final" ? "任务清单" : "任务草案") + "</div>" + planTable(x.tasks) : "") + "</div>").join("") + "</details>";
+  }
+  if (open) {
+    h += '<textarea id="mnote-' + m.id + '" data-keep rows="2" style="margin-top:10px" placeholder="你的意见（可选）：会带给下一轮的发言人；批准定稿时会写进每个任务"></textarea><div class="row" style="margin-top:8px">';
+    if (m.status === "awaiting_approval")
+      h += '<button class="primary" onclick="meetingDecide(' + m.id + ',\\'approve\\')">批准定稿，分派任务</button><button onclick="meetingDecide(' + m.id + ',\\'reject\\')">打回修改定稿</button>';
+    else if (m.round_kind !== "final" && spoken.length) {
+      const force = m.status === "collecting" ? "（跳过没发言的）" : "";
+      h += '<button class="' + (m.status === "review" ? "primary" : "") + '" onclick="meetingNext(' + m.id + ',\\'critique\\')">再互评一轮' + force + "</button>" +
+        '<button onclick="meetingNext(' + m.id + ',\\'finalize\\')">请 ' + esc(m.facilitator) + " 定稿" + force + "</button>";
+    }
+    h += '<button class="danger" onclick="meetingCancel(' + m.id + ')">取消会议</button></div>';
+  }
+  return h + "</div>";
+}
+function taskBoard(s) {
+  const stageChips = (tk) => tk.stages.map((p) => {
+    const live = tk.live && tk.live.stage_id === p.id;
+    return '<span class="chip"' + (live ? ' style="outline:1px solid var(--acc)"' : "") + ">" + esc(p.id) + " · " + esc(p.agent) + (p.gate ? " 🔒" : "") +
+      (live ? " " + (statusText[tk.live.status] || tk.live.status) : "") + "</span>";
+  }).join(" ");
+  const taskStatus = { pending: "未开始", active: "进行中", done: "完成", cancelled: "已取消" };
+  const cls = { pending: "ready", active: "in_progress", done: "working", cancelled: "cancelled" };
+  return '<div class="card"><div class="row"><h2 class="grow">任务 #' + s.run.id + "：" + esc(s.run.goal) + "</h2>" + st(s.run.status) + "</div>" +
+    "<table><tr><th>编号</th><th>任务</th><th>负责 / 审查</th><th>依赖</th><th>文件范围</th><th>状态</th><th>阶段</th></tr>" +
+    s.tasks.map((tk) => "<tr><td><b>" + esc(tk.key) + "</b></td><td>" + esc(tk.title) + "</td><td><small>" + esc(tk.owner) + " / " + esc(tk.reviewer || "—") +
+      "</small></td><td><small>" + esc(tk.depends_on.join("、") || "—") + "</small></td><td><small>" + esc(tk.paths.join("、") || "—") + "</small></td><td>" +
+      '<span class="chip s-' + cls[tk.status] + '">' + taskStatus[tk.status] + "</span>" +
+      (tk.waiting ? '<br><small class="s-stale">' + esc(tk.waiting) + "</small>" : "") + (tk.rounds > tk.stages.length ? " <small>" + tk.rounds + " 轮</small>" : "") +
+      "</td><td><small>" + stageChips(tk) + "</small></td></tr>").join("") + "</table></div>";
+}
+
 function render(s) {
   $("#proj").innerHTML = esc(s.project) + " · " + (s.git.repo ? "git" + (s.git.dirty ? "（" + s.git.dirty + " 个未提交改动）" : "") : '<span class="err">不是 git 仓库</span>');
   $("#banner").innerHTML = s.attention ? '<div class="banner ' + s.attention.kind + '">' + esc(s.attention.message) + "</div>" : "";
   const open = s.run && (s.run.status === "active" || s.run.status === "awaiting_approval");
   $("#stopbtn").style.display = open ? "" : "none";
+  const partsEl = $("#parts"), partsKey = s.agents.map((a) => a.id).join(",");
+  if (partsEl.dataset.key !== partsKey) {
+    partsEl.dataset.key = partsKey;
+    partsEl.innerHTML = "<small>参会：</small>" + s.agents.map((a) => '<label style="margin-right:6px"><input type="checkbox" value="' + esc(a.id) + '" checked style="width:auto"> <small>' + esc(a.id) + "</small></label>").join("");
+  }
 
   let h = "";
+  const m = s.meeting;
+  const mOpen = m && ["collecting", "review", "awaiting_approval"].includes(m.status);
+  if (m && (mOpen || Date.now() - Date.parse(m.ended_at || m.created_at) < 3600e3)) h += meetingCard(m);
+  let multi = false;
   if (s.run) {
     const latest = {};
     for (const a of s.attempts) latest[a.stage_id] = a;
-    h += '<div class="card"><div class="row"><h2 class="grow">任务 #' + s.run.id + "：" + esc(s.run.goal) + "</h2>" + st(s.run.status) + '</div><div class="pipe">' +
+    multi = s.tasks.length > 1 || !!s.run.meeting_id;
+    if (multi) h += taskBoard(s);
+    else h += '<div class="card"><div class="row"><h2 class="grow">任务 #' + s.run.id + "：" + esc(s.run.goal) + "</h2>" + st(s.run.status) + '</div><div class="pipe">' +
       s.pipeline.map((p) => {
         const a = latest[p.id];
         const live = s.live && s.live.stage_id === p.id;
@@ -113,8 +205,9 @@ function render(s) {
           (n > 1 ? " <small>第 " + n + " 轮</small>" : "") + "</div>";
       }).join("") + "</div></div>";
 
-    if (s.live && s.live.status === "awaiting_approval") {
-      const a = s.live, ho = s.handoffs.find((x) => x.id === a.handoff_id), p = s.pipeline.find((x) => x.id === a.stage_id);
+    for (const a of s.lives.filter((x) => x.status === "awaiting_approval")) {
+      const task = s.tasks.find((x) => x.id === a.task_id) || { stages: s.pipeline, key: "", title: "" };
+      const ho = s.handoffs.find((x) => x.id === a.handoff_id), p = task.stages.find((x) => x.id === a.stage_id) || { id: a.stage_id };
       const target = p.on_reject || p.id, rejectFirst = ho && ho.data.verdict === "reject";
       const bApprove = '<button class="' + (rejectFirst ? "" : "primary") + '" onclick="decide(' + a.id + ',\\'approve\\')">' + (rejectFirst ? "仍然通过" : "批准，继续") + "</button>";
       const bReject = '<button class="' + (rejectFirst ? "primary" : "danger") + '" onclick="decide(' + a.id + ',\\'reject\\')">' + (rejectFirst ? "确认打回" : "打回") + "到「" + esc(target) + "」</button>";
@@ -122,11 +215,18 @@ function render(s) {
       try { fb = a.feedback ? JSON.parse(a.feedback) : null; } catch (e) { fb = { user_requirements: [a.feedback], blocking: [], observations: [] }; }
       const fbHtml = fb && (fb.user_requirements.length || fb.blocking.length)
         ? '<div style="margin-bottom:8px"><div class=mute>本轮依据（来自「' + esc(fb.from_stage || "") + '」的打回）</div>' + list(fb.user_requirements.concat(fb.blocking)) + "</div>" : "";
-      h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + fbHtml + (ho ? handoffBody(ho) : "") +
+      h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + (multi ? esc(task.key) + " " + esc(task.title) + " / " : "") + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + fbHtml + (ho ? handoffBody(ho) : "") +
         '<textarea id="note-' + a.id + '" data-keep rows="2" style="margin-top:10px" placeholder="备注（可选）：批准时会带给下一阶段，打回时作为修改意见"></textarea>' +
         '<div class="row" style="margin-top:8px">' + (rejectFirst ? bReject + bApprove : bApprove + bReject) + "</div></div>";
     }
   }
+
+  const leases = s.leases.filter((l) => !l.released_at);
+  if (leases.length)
+    h += '<div class="card"><h2>文件租约</h2><table><tr><th>文件</th><th>持有者</th><th>任务</th><th>类型</th><th>到期</th></tr>' +
+      leases.map((l) => "<tr><td><code>" + esc(l.glob) + "</code></td><td>" + esc(l.agent) + "</td><td>" + esc(l.task || "—") + "</td><td><small>" +
+        (l.exclusive ? "独占" : "共享") + "</small></td><td><small>" + (l.expires_at ? (l.expired ? '<span class="s-stale">已过期（未续期）</span>' : t(l.expires_at)) : "任务结束时") +
+        "</small></td></tr>").join("") + "</table></div>";
 
   for (const q of s.questions)
     h += '<div class="card" style="border-color:var(--acc)"><h2>' + esc(q.agent) + " 问你</h2><div>" + esc(q.question) +
