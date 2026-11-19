@@ -312,8 +312,15 @@ async function update() {
   const url = `https://github.com/${REPO}.git`;
   console.log(`协作桥 ${VERSION}（${short(BUILD.commit)}）：从 GitHub 更新 ${REPO}#${ref}`);
   const latest = remoteCommit(ref);
-  if (latest && latest === BUILD.commit && !BUILD.dirty && !flag("force"))
-    return ok(`已经是 ${ref} 的最新提交 ${short(latest)}（要强制重装加 --force）`);
+  // Compare with the global install, not with this copy: `node bin/ai-bridge.mjs update` from a checkout
+  // runs newer code than what is installed.
+  let installed: typeof BUILD = {};
+  try {
+    const root = execSync("npm root -g", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    installed = JSON.parse(fs.readFileSync(path.join(root, "ai-bridge", "dist", "build-info.json"), "utf8"));
+  } catch {}
+  if (latest && latest === installed.commit && !installed.dirty && !flag("force"))
+    return ok(`全局安装已经是 ${ref} 的最新提交 ${short(latest)}（要强制重装加 --force）`);
   // Not `npm install -g github:…`: for a global git install npm runs the clone's dependency install in
   // global mode, so prepare (tsc) fails without its dependencies, and npm has already removed the old copy.
   // Instead: fetch + build in a temp folder, and only touch the global install once a package exists.
