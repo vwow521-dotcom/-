@@ -86,7 +86,10 @@ async function getClient() {
   if (client) return client;
   connecting = (async () => {
     const c = new Client({ name: "bridge-stdio-proxy", version: "0.2.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"));
+    // Tell the daemon on every request that this session can ring Claude, so an identity it recovers on any
+    // tool call (not only join) gets the claude-socket doorbell back.
+    const headers = SOCK && TOKEN ? { "x-bridge-doorbell": "claude-socket" } : {};
+    const transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"), { requestInit: { headers } });
     httpTransport = transport;
     try {
       await c.connect(transport);
@@ -260,8 +263,29 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     }
   }
   if (name === "leave" && args.agent_id === lastJoin?.agent_id && toolReply(result).ok) forgetJoin(true);
+  if (name !== "join" && !closing && SOCK && TOKEN && typeof args.agent_id === "string") {
+    const r = toolReply(result);
+    if (r.identity_recovered && r.doorbell === "claude-socket") void adoptRecovered(args.agent_id);
+  }
   return result;
 });
+
+// Claude reopened the conversation with a new messaging socket, so there was no join cache to replay; the
+// daemon re-bound the identity on a tool call. Join once in the background (same session, so no takeover)
+// to get a resume key for this socket's cache, then park on the doorbell again.
+async function adoptRecovered(agent) {
+  if (lastJoin?.agent_id === agent && doorbell?.agent === agent) return;
+  const args = { agent_id: agent, _doorbell: "claude-socket", _recovery: { key: randomUUID(), replay: false } };
+  try {
+    const joined = toolReply(await upstream((c) => c.callTool({ name: "join", arguments: args }, undefined, { timeout: 10_000 })));
+    if (closing || joined.error || joined.agent_id !== agent) return log("adopt recovered identity failed", { agent, error: joined.error ?? null });
+    saveJoin(args);
+    armDoorbell(joined.doorbell === "claude-socket" ? agent : null);
+    log("adopted recovered identity", { agent, doorbell: joined.doorbell });
+  } catch (e) {
+    log("adopt recovered identity failed", { agent, error: String(e?.message ?? e) });
+  }
+}
 
 let announcing = false;
 async function waitForDaemonThenAnnounce() {

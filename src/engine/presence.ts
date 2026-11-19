@@ -24,6 +24,9 @@ interface AgentPresence {
 
 export class Presence {
   private readonly agents = new Map<string, AgentPresence>();
+  // Doorbell a client announced for its MCP session (the Claude proxy sends x-bridge-doorbell on every request),
+  // so an identity recovered on any tool call gets its doorbell back, not only one recovered through join.
+  private readonly sessionDoorbell = new Map<string, string>();
   /** Set by the HTTP layer: is this MCP session still open? */
   isSessionOpen: (sessionId: string) => boolean = () => true;
 
@@ -98,12 +101,23 @@ export class Presence {
     p.lastSeenAt = Date.now();
   }
 
+  setSessionDoorbell(sessionId: string, hint: string | undefined) {
+    if (hint) this.sessionDoorbell.set(sessionId, hint);
+  }
+
+  private applyDoorbellHint(p: AgentPresence, hint: string | undefined) {
+    if (hint !== "claude-socket") return;
+    this.doorbells.claudeSocket.markRegistered(p.id);
+    p.doorbellError = undefined;
+  }
+
   /** The next MCP tool call may claim an identity orphaned by a closed session. */
   recoverBinding(agent: string, sessionId: string | undefined): boolean {
     const p = this.agents.get(agent);
     if (!sessionId || !p?.canRecover || p.sessionId) return false;
     this.ctx.store.setResumeKey(agent);
     this.bind(p, sessionId);
+    this.applyDoorbellHint(p, this.sessionDoorbell.get(sessionId));
     this.ctx.log("identity_recovered", { agent, session: sessionId });
     this.ctx.event(null, agent, "join", `${agent} 的 MCP 会话关闭后已重新绑定`);
     this.callbacks.resendLiveTask(agent);
@@ -141,10 +155,7 @@ export class Presence {
       this.ctx.log("join_takeover", { agent, from: p.sessionId, to: sessionId });
     }
     this.bind(p, sessionId);
-    if (doorbellHint === "claude-socket") {
-      this.doorbells.claudeSocket.markRegistered(agent);
-      p.doorbellError = undefined;
-    }
+    this.applyDoorbellHint(p, doorbellHint ?? (sessionId ? this.sessionDoorbell.get(sessionId) : undefined));
     const bell = this.doorbells.primary(agent);
     const kind = bell.kind;
     this.ctx.log("join", { agent, session: sessionId, doorbell: kind, chain: this.doorbells.chain(agent), recovered: recovery?.replay || undefined });
@@ -171,6 +182,7 @@ export class Presence {
   }
 
   sessionClosed(sessionId: string) {
+    this.sessionDoorbell.delete(sessionId);
     for (const p of this.agents.values())
       if (p.sessionId === sessionId) {
         p.sessionId = undefined;

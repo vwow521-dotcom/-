@@ -170,7 +170,8 @@ export class Workspace {
     const stuck = agents.find((a) => a.stuckMail > 0);
     const unanswered = agents.find((a) => a.unansweredMail > 0);
     if (stuck) attention = { kind: "fallback", agent: stuck.id, message: `${stuck.id} 没有响应门铃，有 ${stuck.stuckMail} 封信送不到。请在 ${stuck.id} 里说「继续」。` };
-    else if (unanswered) attention = { kind: "fallback", agent: unanswered.id, message: `${unanswered.id} 已响铃但尚未取信。请在对应对话里说「继续」。` };
+    else if (unanswered)
+      attention = { kind: "fallback", agent: unanswered.id, message: `${unanswered.id} 叫不醒，有 ${unanswered.unansweredMail} 封信没取（对话可能已关闭或断开）。请打开它的对话说一句「继续」。` };
     else if (run && (run.status === "active" || run.status === "awaiting_approval"))
       for (const l of lives) {
         if (l.status !== "ready" && l.status !== "in_progress") continue;

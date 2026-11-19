@@ -56,6 +56,8 @@ export class CodexQueueDoorbell implements Doorbell {
   // A failed `codex queue` takes the doorbell out of the chain for a while, so the Stop hook is told to
   // park again (the fallback) at the end of the agent's next turn.
   private failedAt = new Map<string, number>();
+  // `codex queue` takes a few seconds; a second ring meanwhile would stack another wake (run #6: an empty turn).
+  private inFlight = new Set<string>();
   static readonly RETRY_AFTER_MS = 10 * 60_000;
 
   constructor(private ctx: DoorbellContext) {}
@@ -118,10 +120,13 @@ export class CodexQueueDoorbell implements Doorbell {
     const thread = this.thread(w.agent);
     if (!cmd) return { ok: false, error: "找不到 codex 命令" };
     if (!thread) return { ok: false, error: "还不知道这个 Codex 对话的 ID（它结束一轮后由 Stop hook 登记）" };
+    if (this.inFlight.has(thread)) return { ok: true, note: "上一条叫醒消息正在排进 Codex 队列" };
     if (this.pending(thread)) return { ok: true, note: "Codex 队列里已经有一条叫醒消息" };
     const args = [...cmd.slice(1), "queue", "--thread", thread, "--message", w.text];
+    this.inFlight.add(thread);
     return new Promise((resolve) => {
       execFile(cmd[0], args, { timeout: 20_000, windowsHide: true, maxBuffer: 1 << 20 }, (err, stdout, stderr) => {
+        this.inFlight.delete(thread);
         const out = `${stdout ?? ""}${stderr ?? ""}`.trim();
         this.ctx.log("codex_queue", { agent: w.agent, thread, ok: !err, out: out.slice(0, 300) });
         if (err) this.failedAt.set(w.agent, Date.now());

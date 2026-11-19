@@ -59,6 +59,7 @@ app.post("/mcp", async (req, res) => {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         transports.set(id, t);
+        engine.presence.setSessionDoorbell(id, req.header("x-bridge-doorbell"));
         engine.context.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo });
       },
     });

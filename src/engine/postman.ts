@@ -9,6 +9,9 @@ import type { Presence } from "./presence.js";
 // agent's chain or telling the human. A woken agent may think a while before its first tool call.
 const WAKE_GRACE_MS = Number(process.env.BRIDGE_WAKE_GRACE_SECONDS ?? process.env.BRIDGE_CODEX_WAKE_GRACE_SECONDS ?? 30) * 1000;
 export const LIVE_MAIL = ["queued", "rung", "stuck"] as const;
+// Queued mail that no doorbell can deliver (e.g. Claude closed the conversation): tell the human this soon,
+// without marking it stuck, so it is still delivered when the agent comes back.
+const UNREACHABLE_ALERT_MS = Number(process.env.BRIDGE_UNREACHABLE_ALERT_SECONDS ?? 15) * 1000;
 
 export class Postman {
   private readonly wakeAlerts = new Set<string>(); // mail IDs already reported to the human as "rang, no response"
@@ -228,6 +231,21 @@ export class Postman {
         this.ctx.store.setMailStatus([m.id], "queued");
         this.kick(m.to_agent);
       }
+    }
+    // No doorbell can reach the agent right now (its conversation was closed, its proxy is gone) → tell the human early.
+    const unreachable = new Map<string, string[]>();
+    for (const m of this.ctx.store.allMailByStatus(["queued"])) {
+      if (now - Date.parse(m.created_at) < UNREACHABLE_ALERT_MS || this.wakeAlerts.has(m.id)) continue;
+      const st = this.presence.status(m.to_agent);
+      if (st === "working" || st === "waiting" || this.doorbells.pick(m.to_agent)) continue;
+      unreachable.set(m.to_agent, [...(unreachable.get(m.to_agent) ?? []), m.id]);
+    }
+    for (const [agent, ids] of unreachable) {
+      for (const id of ids) this.wakeAlerts.add(id);
+      this.ctx.log("agent_unreachable", { agent, mails: ids, status: this.presence.status(agent) });
+      this.ctx.event(null, agent, "stuck", `${agent} 现在叫不醒（对话可能已关闭），有 ${ids.length} 封信在排队`);
+      this.ctx.notifyHuman(`协作桥：${agent} 叫不醒`, `${agent} 的对话可能已关闭或断开，信在排队。请打开它的对话说一句「继续」。`);
+      this.ctx.onChange();
     }
     // Queued mail that no doorbell can deliver (agent not parked / proxy gone, not polling, not busy) → ask the human.
     for (const m of this.ctx.store.allMailByStatus(["queued"])) {

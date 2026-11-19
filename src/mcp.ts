@@ -13,7 +13,16 @@ export function buildServer(engine: Engine): McpServer {
   const withAgent = async (agent: string, session: string | undefined, run: () => Result | Promise<Result>) => {
     const recovered = engine.presence.recoverBinding(agent, session);
     const result = await run();
-    return text(recovered ? { ...result, identity_recovered: true, identity_note: `旧 MCP 会话已关闭，已在本会话恢复 ${agent} 身份。` } : result);
+    if (!recovered) return text(result);
+    const doorbell = engine.presence.doorbellKind(agent);
+    return text({
+      ...result,
+      identity_recovered: true,
+      doorbell,
+      identity_note:
+        `旧 MCP 会话已关闭，已在本会话恢复 ${agent} 身份。` +
+        (doorbell === "poll" ? "门铃是轮询：处理完后调用 wait_for_mail 等信。" : "门铃已重新接上，不需要轮询：处理完后直接结束本回合，有新信时会叫醒你。"),
+    });
   };
 
   server.registerTool(

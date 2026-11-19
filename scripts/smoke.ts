@@ -62,7 +62,7 @@ let daemon: ChildProcess;
 async function startDaemon() {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", proj, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: "6", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
+    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: "6", BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -556,6 +556,42 @@ try {
   check(await waitForProxyBinding(), "idle proxy restores its binding and doorbell after daemon restart");
   await checkProxyDelivery(proxy, "守护进程重启后的首封信");
 
+  // Run #6: Claude desktop shut the idle conversation down (proxy gone), then reopened it with a NEW messaging
+  // socket, so there is no join cache to replay. Mail meanwhile → the human is told soon; the first tool call
+  // recovers the identity and the proxy gets its doorbell back.
+  await proxy.close();
+  const away = await api("/api/mail", { to: "pbot", text: "对话关着时来的信" });
+  for (let i = 0; i < 80 && !(await state()).agents.find((a: any) => a.id === "pbot").unansweredMail; i++) await sleep(100);
+  s = await state();
+  check(
+    s.agents.find((a: any) => a.id === "pbot").unansweredMail === 1 && s.attention?.agent === "pbot" && s.mail.find((m: any) => m.id === away.json.id)?.status === "queued",
+    "mail for a closed conversation alerts the human within seconds and stays queued",
+  );
+  const pipe2Path = `\\\\.\\pipe\\bridge-smoke-${randomUUID()}`;
+  const frames2: any[] = [];
+  const pipe2 = net.createServer((sock) => {
+    let buf = "";
+    sock.on("data", (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        frames2.push(JSON.parse(buf.slice(0, i)));
+        buf = buf.slice(i + 1);
+      }
+    });
+  });
+  await new Promise<void>((r) => pipe2.listen(pipe2Path, r));
+  ({ proxy } = await connectClaudeProxy(pipe2Path));
+  const reopened = await call(proxy, "fetch_inbox", { agent_id: "pbot" });
+  check(reopened.identity_recovered && reopened.doorbell === "claude-socket" && /不需要轮询/.test(reopened.identity_note) && !/wait_for_mail/.test(reopened.instructions) && reopened.mails.some((m: any) => m.id === away.json.id),
+    "first tool call from the reopened conversation recovers the identity with the claude-socket doorbell");
+  check(await waitForProxyBinding(), "the proxy re-arms the doorbell after a recovery on a plain tool call");
+  const after = await api("/api/mail", { to: "pbot", text: "恢复之后的信" });
+  for (let i = 0; i < 40 && frames2.length < 2; i++) await sleep(100);
+  check(frames2[1]?.message?.content.includes("[协作桥]") && (await call(proxy, "fetch_inbox", { agent_id: "pbot" })).mails.some((m: any) => m.id === after.json.id),
+    "the reopened conversation is woken through its new socket");
+  pipe2.close();
+
   await api("/api/agents/pbot/release", {});
   await proxy.close();
   ({ proxy } = await connectClaudeProxy());
@@ -627,7 +663,7 @@ try {
     if (s.attention?.agent === "hbot") break;
     await sleep(100);
   }
-  check(s.attention?.agent === "hbot" && s.attention.message.includes("尚未取信") && s.mail.find((m: any) => m.id === ringMail.json.id)?.status === "rung", `unfetched hook ring triggers a panel warning before sweep (${Date.now() - rangAt} ms)`);
+  check(s.attention?.agent === "hbot" && s.attention.message.includes("叫不醒") && s.mail.find((m: any) => m.id === ringMail.json.id)?.status === "rung", `unfetched hook ring triggers a panel warning before sweep (${Date.now() - rangAt} ms)`);
   const manual = await connect("manual-codex");
   await call(manual, "join", { agent_id: "hbot" });
   check((await call(manual, "fetch_inbox", { agent_id: "hbot" })).mails.some((m: any) => m.id === ringMail.json.id), "manual recovery can still fetch the pending mail");
@@ -713,12 +749,20 @@ try {
   qdb.close();
   await call(qbot, "fetch_inbox", { agent_id: "qbot" });
 
+  // Run #6: two mails seconds apart → the second ring lands while `codex queue` is still running → one wake.
+  const burstBefore = codexCalls().length;
+  await Promise.all([api("/api/mail", { to: "qbot", text: "连发 1" }), api("/api/mail", { to: "qbot", text: "连发 2" })]);
+  await sleep(1500);
+  check(codexCalls().length === burstBefore + 1, "mails in quick succession queue a single Codex wake");
+  await call(qbot, "fetch_inbox", { agent_id: "qbot" });
+
   // Rung, but no tool call within the grace → the human is told (no other doorbell is available).
+  const silentBefore = codexCalls().length;
   const silent = await api("/api/mail", { to: "qbot", text: "没人理的信" });
   await sleep(7500);
   s = await state();
   check(
-    codexCalls().length === 2 && s.agents.find((a: any) => a.id === "qbot").unansweredMail === 1 && s.events.some((e: any) => e.agent === "qbot" && e.text.includes("仍有")),
+    codexCalls().length === silentBefore + 1 && s.agents.find((a: any) => a.id === "qbot").unansweredMail === 1 && s.events.some((e: any) => e.agent === "qbot" && e.text.includes("仍有")),
     "no sign of life after a codex-queue ring → alert",
   );
   await call(qbot, "fetch_inbox", { agent_id: "qbot" });
