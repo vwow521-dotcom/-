@@ -1,6 +1,8 @@
 // Rebuild the install package from this tree and reinstall it globally, then refresh client config.
 //   npm run reinstall
-// Steps: ai-bridge uninstall (if installed) → npm pack → npm install -g → ai-bridge setup → ai-bridge doctor.
+// Steps: npm pack (runs prepare: build + build-info) → npm install -g → ai-bridge setup --refresh → ai-bridge doctor.
+// `--refresh` only updates clients that already have a bridge entry; run `ai-bridge setup` once to add new ones.
+// To install what is on GitHub instead of this working tree, use `ai-bridge update`.
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 
@@ -11,13 +13,8 @@ const run = (cmd, opts = {}) => {
 const version = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
 const tgz = `release/ai-bridge-${version}.tgz`;
 
-try {
-  run("ai-bridge uninstall");
-} catch {
-  console.log("（之前没有安装 ai-bridge，跳过卸载）");
-}
 fs.mkdirSync("release", { recursive: true });
 run("npm pack --pack-destination release");
 run(`npm install -g ${tgz}`);
-run("ai-bridge setup");
+run("ai-bridge setup --refresh");
 run("ai-bridge doctor");

@@ -7,23 +7,30 @@
 - **审批与返工**：从面板批准、打回或回答问题，返工要求会随下一次交接传达。
 - **交接记录**：信件状态保存在本地 SQLite，Git 提交记录交接与审查结论。
 
-## 在 Windows 上从源码安装
+## 在 Windows 上从 GitHub 安装
 
 需要 Node.js 22.13 或更新版本，以及 Git。在 PowerShell 中运行：
 
 ```powershell
-git clone https://github.com/vwow521-dotcom/Interaction-ai.git
-cd Interaction-ai
-npm ci
-npm pack
-npm install -g .\ai-bridge-0.3.0.tgz
+npm install -g github:vwow521-dotcom/Interaction-ai
 ai-bridge setup
 ai-bridge doctor
 ```
 
-`npm pack` 会自动构建，并输出安装包文件名。若版本更新，用它输出的文件名替换示例中的 `ai-bridge-0.3.0.tgz`。`ai-bridge setup` 会先备份配置，再注册 Claude 和 Codex 的 MCP 服务及 Codex Stop hook。
+npm 会克隆仓库，并在本机构建。`ai-bridge setup` 会先备份配置，再注册 Claude 和 Codex 的 MCP 服务以及 Codex Stop hook。只用其中一个客户端的话，`setup` 之后把另一个的配置删掉即可，后续更新不会把它加回来。
 
-安装后，在 Codex 的 **Settings > Hooks** 里信任新的 Stop hook，然后在 Claude 和 Codex 中各新开一个对话。
+安装后，在 Codex 的 **Settings > Hooks** 里信任新的 Stop hook，然后在 Claude 和 Codex 里各新开一个对话。
+
+## 保持最新
+
+所有客户端都指向同一个全局安装，所以只需要更新这一处：
+
+```powershell
+ai-bridge doctor     # 第一行显示安装自哪个提交，以及是否落后于 GitHub main
+ai-bridge update     # 从 GitHub 重新安装，然后只刷新已经配置了 bridge 的客户端
+```
+
+`update` 还支持 `--ref <分支|标签|提交>`、`--force` 和 `--dry-run`。更新后要新开对话；如果桥正在运行，需要重新 `ai-bridge start` 一次。运行 `update` 时最好先关掉 Codex，否则 Codex 可能用它内存里的旧配置覆盖 `~/.codex/config.toml`。
 
 ## 使用
 
@@ -47,7 +54,7 @@ ai-bridge uninstall          # 移除 setup 添加的全部配置，也会清理
 npm uninstall -g ai-bridge
 ```
 
-重装：先 `npm install -g` 新的安装包，再运行一次 `ai-bridge setup`。各项目里的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
+重装就运行 `ai-bridge update --force`。各项目里的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
 
 ## 更多
 

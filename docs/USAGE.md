@@ -10,15 +10,15 @@
 
 ## 1. 安装（一次）
 
-需要 Node.js 22.13 或更新版本，以及 Git。参照 [README 的源码安装步骤](../README.md)检出仓库，或直接使用已有的 `.tgz` 安装包。在仓库根目录构建和安装 0.3.0 的命令如下：
+需要 Node.js 22.13 或更新版本，以及 Git。
 
 ```powershell
-npm ci
-npm pack
-npm install -g .\ai-bridge-0.3.0.tgz
+npm install -g github:vwow521-dotcom/Interaction-ai
 ai-bridge setup
 ai-bridge doctor
 ```
+
+npm 会克隆仓库，并在本机构建（`prepare` 脚本），同时把这次构建对应的提交记进 `dist/build-info.json`，`doctor` 用它判断安装是否最新。
 
 `setup` 会做下面几件事，每改一个文件都会先在原位置备份（`*.bak-ai-bridge-<时间>`）：
 
@@ -89,4 +89,16 @@ ai-bridge uninstall          # 移除 setup 添加的全部配置，也会清理
 npm uninstall -g ai-bridge
 ```
 
-重装：先 `npm install -g <新的安装包>`，再 `ai-bridge setup`。在源码仓库里，`npm run reinstall` 会一步完成"卸载配置 → 重新打包 → 全局安装 → setup → doctor"。各项目的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
+## 7. 更新
+
+```powershell
+ai-bridge doctor     # 第一行：安装自哪个提交，是否落后于 GitHub main
+ai-bridge update     # npm install -g github:… → ai-bridge setup --refresh → ai-bridge doctor
+```
+
+- `setup --refresh` 只更新**已经存在**的 bridge 配置，不会新增。你有意删掉的客户端（比如不用 Codex 时删掉的 `[mcp_servers.bridge]`）不会被加回来。要新增客户端就运行一次 `ai-bridge setup`。
+- 全局安装的路径不变，所以更新后客户端配置通常不用改，Codex 的 hook 也不用重新信任。新代码只对**新开的对话**生效。如果桥正在运行，要重新 `ai-bridge start`。
+- 选项：`--ref <分支|标签|提交>` 安装指定版本，`--force` 在已经是最新时也重装，`--dry-run` 只显示会做什么。
+- 运行前最好先关掉 Codex，否则 Codex 可能用它内存里的旧配置覆盖 `~/.codex/config.toml`。
+
+在源码仓库里，`npm run reinstall` 会安装**本地工作区**的版本（打包 → 全局安装 → `setup --refresh` → doctor），开发时用。各项目的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。

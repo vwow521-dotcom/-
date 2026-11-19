@@ -2,6 +2,10 @@
   "name": "ai-bridge",
   "version": "0.3.0",
   "description": "本地 AI 协作桥：让 Claude、Codex 等桌面端 AI 通过 MCP 信箱与门铃接力完成同一个项目",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vwow521-dotcom/Interaction-ai.git"
+  },
   "type": "module",
   "private": true,
   "bin": {
@@ -19,7 +23,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build",
+    "prepare": "npm run build && node scripts/build-info.mjs",
     "start": "tsx src/daemon.ts",
     "dev": "tsx src/daemon.ts",
     "smoke": "tsx scripts/smoke.ts",

@@ -17,11 +17,12 @@ npm start -- --project <dir> [--port 7878]   # dev: run the daemon from src via 
 npm run smoke       # end-to-end regression: own daemon on port 7891, temp git repo, fake Claude pipe, fake Codex transcripts
 npm run typecheck
 npm run build       # tsc -p tsconfig.build.json → dist/ (src/m0 excluded)
-npm run reinstall   # ai-bridge uninstall → npm pack into release/ → npm i -g → ai-bridge setup → ai-bridge doctor
+npm run reinstall   # npm pack into release/ → npm i -g → ai-bridge setup --refresh → ai-bridge doctor (local tree)
+ai-bridge update    # install github:vwow521-dotcom/Interaction-ai#main globally → setup --refresh → doctor
 npm run cli -- <cmd> [--dry-run]   # run the CLI from this tree (setup/uninstall/init/start/doctor)
 ```
 
-**The user's Claude and Codex point at the globally installed copy** (`%APPDATA%\npm\node_modules\ai-bridge`), not at this tree. After changing `bin/` or `src/`, run `npm run reinstall` so the clients pick it up. `npm run cli -- setup` would point the clients at this dev tree instead. Testing `setup`/`uninstall` against copied config files is not isolated: they also clean `.codex/hooks.json` in the real project folders listed in the config. Use `--dry-run`.
+**The user's Claude and Codex point at the globally installed copy** (`%APPDATA%\npm\node_modules\ai-bridge`), not at this tree. After changing `bin/` or `src/`, run `npm run reinstall` so the clients pick it up; once pushed, `ai-bridge update` installs from GitHub. `prepare` builds and writes `dist/build-info.json` (commit), which `doctor` compares with GitHub main. `setup --refresh` (used by both) only touches bridge entries that already exist: the user removed Codex's bridge entry on purpose, so never re-add a client they removed. `npm run cli -- setup` would point the clients at this dev tree instead. Testing `setup`/`uninstall` against copied config files is not isolated: they also clean `.codex/hooks.json` in the real project folders listed in the config. Use `--dry-run`.
 
 Extend `scripts/smoke.ts` whenever you change engine, proxy or hook behaviour.
 
