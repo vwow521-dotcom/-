@@ -132,6 +132,8 @@ app.post("/api/questions/:id/answer", (req, res) => {
   if (!answer) return void res.status(400).json({ error: "回答不能为空" });
   reply(res, engine.answer(Number(req.params.id), answer));
 });
+app.post("/api/agents/:id/release", (req, res) => reply(res, engine.release(req.params.id, "human")));
+
 app.post("/api/mail", (req, res) => {
   const to = String(req.body?.to ?? "");
   const t = String(req.body?.text ?? "").trim();

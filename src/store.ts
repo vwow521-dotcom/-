@@ -37,7 +37,17 @@ export interface HandoffData {
   files_changed: string[];
   notes_for_next: string;
   verdict?: "approve" | "reject";
-  review_comments?: string[];
+  review_comments?: string[]; // blocking issues that must be fixed
+  observations?: string[]; // non-blocking suggestions
+}
+
+/** Structured rework/approval feedback carried into an attempt (stored as JSON in attempts.feedback). */
+export interface Feedback {
+  kind: "rework" | "approval_note" | "carried";
+  from_stage: string;
+  user_requirements: string[]; // what the human asked for at the gate — must be done
+  blocking: string[]; // review issues behind a reject verdict — must be fixed
+  observations: string[]; // non-blocking review notes — optional
 }
 
 export interface Handoff {
@@ -49,6 +59,7 @@ export interface Handoff {
   data: HandoffData;
   commit_sha: string | null;
   commit_error: string | null;
+  scope_notes: string[]; // e.g. files changed but not declared, files owned by another stage
   created_at: string;
 }
 
@@ -145,6 +156,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS codex_threads (
         session_id TEXT PRIMARY KEY, agent TEXT NOT NULL, registered_at TEXT NOT NULL, last_parked_at TEXT);
     `);
+    // Migrations for databases created by earlier versions.
+    const cols = (t: string) => (this.db.prepare(`PRAGMA table_info(${t})`).all() as { name: string }[]).map((c) => c.name);
+    if (!cols("handoffs").includes("scope_notes")) this.db.exec("ALTER TABLE handoffs ADD COLUMN scope_notes TEXT");
   }
 
   // ---- mail
@@ -264,13 +278,13 @@ export class Store {
   // ---- handoffs
   addHandoff(h: Omit<Handoff, "id" | "created_at">): Handoff {
     const id = this.insert(
-      "INSERT INTO handoffs (run_id, attempt_id, stage_id, agent, data, commit_sha, commit_error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      h.run_id, h.attempt_id, h.stage_id, h.agent, JSON.stringify(h.data), h.commit_sha, h.commit_error, now(),
+      "INSERT INTO handoffs (run_id, attempt_id, stage_id, agent, data, commit_sha, commit_error, scope_notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      h.run_id, h.attempt_id, h.stage_id, h.agent, JSON.stringify(h.data), h.commit_sha, h.commit_error, JSON.stringify(h.scope_notes), now(),
     );
     return this.handoff(id)!;
   }
   private parseHandoff(row: any): Handoff {
-    return { ...row, data: JSON.parse(row.data) };
+    return { ...row, data: JSON.parse(row.data), scope_notes: row.scope_notes ? JSON.parse(row.scope_notes) : [] };
   }
   handoff(id: number) {
     const r = this.one<any>("SELECT * FROM handoffs WHERE id = ?", id);

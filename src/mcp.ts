@@ -84,10 +84,20 @@ export function buildServer(engine: Engine): McpServer {
     "get_context",
     {
       title: "获取任务上下文",
-      description: "获取当前任务的目标、各阶段状态、全部交接单和共享笔记。需要比任务信更多的背景时调用。",
+      description: "获取当前任务的目标、本轮反馈、各阶段状态、最近几份交接单（更早的只给一句摘要）和共享笔记。需要比任务信更多的背景时调用。",
+      inputSchema: { agent_id: agentId, last_n: z.number().int().min(0).max(50).optional().describe("返回最近几份完整交接单，默认 3") },
+    },
+    async ({ agent_id, last_n }, extra) => text(engine.getContext(agent_id, extra.sessionId, last_n ?? 3)),
+  );
+
+  server.registerTool(
+    "leave",
+    {
+      title: "退出协作桥",
+      description: "释放你的身份（例如换到新会话之前），让新会话可以直接 join。",
       inputSchema: { agent_id: agentId },
     },
-    async ({ agent_id }, extra) => text(engine.getContext(agent_id, extra.sessionId)),
+    async ({ agent_id }, extra) => text(engine.release(agent_id, "agent", extra.sessionId)),
   );
 
   server.registerTool(
@@ -147,7 +157,8 @@ export function buildServer(engine: Engine): McpServer {
         files_changed: z.array(z.string()).default([]).describe("改动的文件路径"),
         notes_for_next: z.string().default("").describe("给下一个角色的注意事项"),
         verdict: z.enum(["approve", "reject"]).optional().describe("仅审查阶段：approve 通过 / reject 打回"),
-        review_comments: z.array(z.string()).optional().describe("仅审查阶段：具体问题列表"),
+        review_comments: z.array(z.string()).optional().describe("仅审查阶段：必须修改的阻塞问题"),
+        observations: z.array(z.string()).optional().describe("仅审查阶段：不影响通过的建议（非阻塞）"),
       },
     },
     async ({ agent_id, ...data }, extra) => text(await engine.submitHandoff(agent_id, extra.sessionId, data)),

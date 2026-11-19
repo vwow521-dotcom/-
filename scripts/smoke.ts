@@ -29,7 +29,7 @@ fs.writeFileSync(
   path.join(proj, "bridge.config.yaml"),
   `agents: { claude: {}, codex: {}, pbot: {}, hbot: {}, hbot2: {}, hbot3: { doorbell: codex-hook } }
 pipeline:
-  - { id: plan, role: 规划, agent: claude, gate: true }
+  - { id: plan, role: 规划, agent: claude, gate: true, owns: [DESIGN.md] }
   - { id: implement, role: 编码, agent: codex }
   - { id: review, role: 审查, agent: claude, gate: true, on_reject: implement }
 wait: { poll_seconds: 2, stale_after_seconds: 30, offline_after_seconds: 60 }
@@ -124,7 +124,10 @@ try {
   const codexWait = call(codex, "wait_for_mail", { agent_id: "codex" });
   await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "输出要带感叹号" });
   t = task(await codexWait);
-  check(t?.stage.id === "implement" && t.feedback?.includes("感叹号") && t.input_handoff?.summary === "写了设计", "codex woken with implement task + approval note");
+  check(
+    t?.stage.id === "implement" && t.feedback?.kind === "approval_note" && t.feedback.user_requirements[0].includes("感叹号") && t.input_handoff?.summary === "写了设计",
+    "codex woken with implement task + structured approval note",
+  );
 
   const asked = await call(codex, "ask_human", { agent_id: "codex", question: "用 console.log 吗？" });
   check(asked.status === "submitted", "ask_human returns immediately");
@@ -147,30 +150,44 @@ try {
   check(d1.duplicate === false && d2.duplicate === true, "same mail_id is delivered once (dedupe)");
 
   write("hello.js", "console.log('hello')\n");
+  write("extra.txt", "not declared\n");
   sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "实现 v1", files_changed: ["hello.js"] });
   check(sub.next === "claude/review", "implement → review");
+  s = await state();
+  check(s.handoffs.at(-1).scope_notes.some((n: string) => n.includes("extra.txt")), "undeclared changed file flagged in scope notes");
 
   let cm = await call(claude, "fetch_inbox", { agent_id: "claude" });
   t = task(cm);
   check(t?.stage.id === "review" && cm.mails.some((m: any) => m.id === "dup-1"), "claude gets review task and codex's note");
-  const ctx = await call(claude, "get_context", { agent_id: "claude" });
-  check(ctx.handoffs.length === 2 && ctx.notes.some((n: any) => n.text === "用 node 写"), "get_context has handoffs and notes");
-  await call(claude, "submit_handoff", { agent_id: "claude", summary: "缺感叹号", verdict: "reject", review_comments: ["输出没有感叹号"] });
+  const ctx = await call(claude, "get_context", { agent_id: "claude", last_n: 1 });
+  check(
+    ctx.handoffs_total === 2 && ctx.recent_handoffs.length === 1 && ctx.older_handoffs.length === 1 && ctx.notes.some((n: any) => n.text === "用 node 写"),
+    "get_context returns only the last N handoffs in full",
+  );
+  sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "缺感叹号", verdict: "reject", review_comments: ["输出没有感叹号"], observations: ["变量名可以更清楚"] });
+  check(/^[0-9a-f]{40}$/.test(sub.commit), "review with no file changes still gets an (empty) commit");
   s = await state();
   await api(`/api/attempts/${s.live.id}/decide`, { action: "reject", note: "按审查意见改" });
   t = task(await call(codex, "wait_for_mail", { agent_id: "codex" }));
-  check(t?.stage.id === "implement" && t.feedback.includes("输出没有感叹号") && t.feedback.includes("按审查意见改"), "rework carries review comments + human note");
+  check(
+    t?.stage.id === "implement" && t.feedback.kind === "rework" && t.feedback.user_requirements[0] === "按审查意见改" &&
+      t.feedback.blocking[0] === "输出没有感叹号" && t.feedback.observations[0] === "变量名可以更清楚",
+    "rework feedback split into user requirements / blocking / observations",
+  );
   write("hello.js", "console.log('hello!')\n");
-  await call(codex, "submit_handoff", { agent_id: "codex", summary: "加了感叹号" });
+  write("DESIGN.md", "# hello\nprint hello!\n");
+  await call(codex, "submit_handoff", { agent_id: "codex", summary: "加了感叹号", files_changed: ["hello.js", "DESIGN.md"] });
+  s = await state();
+  check(s.handoffs.at(-1).scope_notes.some((n: string) => n.includes("plan") && n.includes("DESIGN.md")), "touching another stage's file flagged");
   t = task(await call(claude, "wait_for_mail", { agent_id: "claude" }));
-  check(t?.stage.id === "review", "second review delivered");
+  check(t?.stage.id === "review" && t.feedback?.kind === "carried" && t.feedback.user_requirements[0] === "按审查意见改", "re-review carries this round's user requirements");
   await call(claude, "submit_handoff", { agent_id: "claude", summary: "通过", verdict: "approve" });
   s = await state();
   await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "" });
   s = await state();
   check(s.run.status === "done" && !s.live, "run done after final approval");
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
-  check(commits.length === 3, `3 bridge commits for changed stages (got ${commits.length})`);
+  check(commits.length === 5 && commits.some((c) => c.includes("审查通过")), `5 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
   check((await fetch(BASE + "/")).ok, "panel page served");
 
@@ -185,6 +202,15 @@ try {
   await call(claude, "join", { agent_id: "claude" });
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(t?.resumed === true && t.stage.id === "plan", "in-progress stage re-sent as mail after restart + rejoin");
+
+  // Identity: a blocked join explains how to proceed; the panel can release; the agent can leave.
+  const intruder = await connect("intruder");
+  const blocked = await call(intruder, "join", { agent_id: "claude" });
+  check(blocked.error && typeof blocked.auto_release_in_seconds === "number" && blocked.options?.length >= 2, "blocked join reports idle time, auto-release and options");
+  check((await api("/api/agents/claude/release", {})).status === 200, "panel releases the identity");
+  check((await call(claude, "fetch_inbox", { agent_id: "claude" })).error, "released session can no longer act");
+  check(!(await call(intruder, "join", { agent_id: "claude" })).error, "new session joins without takeover after release");
+  check(!(await call(intruder, "leave", { agent_id: "claude" })).error && !(await call(claude, "join", { agent_id: "claude" })).error, "leave frees it for the next session");
   await api("/api/runs/stop", {});
 
   // ===== B: stdio proxy as the Claude doorbell =====

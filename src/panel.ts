@@ -61,6 +61,11 @@ async function decide(id, action) {
   try { await post("/api/attempts/" + id + "/decide", { action, note }); } catch (e) { alert(e.message); }
   load();
 }
+async function releaseAgent(agent) {
+  if (!confirm("释放 " + agent + " 的身份？之后新会话可以直接 join；旧会话的调用会被拒绝。")) return;
+  try { await post("/api/agents/" + agent + "/release"); } catch (e) { alert(e.message); }
+  load();
+}
 async function sendMsg(agent) {
   const el = document.getElementById("msg-" + agent);
   if (!el.value.trim()) return;
@@ -77,7 +82,9 @@ function handoffBody(h) {
   const d = h.data;
   return '<div><b>' + esc(d.summary) + "</b></div>" +
     (d.verdict ? "<div>审查结论：" + (d.verdict === "approve" ? '<b class="s-working">通过</b>' : '<b class="s-rejected">打回</b>') + "</div>" : "") +
-    (d.review_comments && d.review_comments.length ? "<div class=mute>审查意见</div>" + list(d.review_comments) : "") +
+    (d.review_comments && d.review_comments.length ? "<div class=mute>阻塞问题</div>" + list(d.review_comments) : "") +
+    (d.observations && d.observations.length ? "<div class=mute>观察（非阻塞）</div>" + list(d.observations) : "") +
+    (h.scope_notes && h.scope_notes.length ? '<div class="err">范围提示</div>' + list(h.scope_notes) : "") +
     (d.done.length ? "<div class=mute>已完成</div>" + list(d.done) : "") +
     (d.todo.length ? "<div class=mute>待办</div>" + list(d.todo) : "") +
     (d.decisions.length ? "<div class=mute>关键决策</div>" + list(d.decisions.map((x) => x.what + " —— " + x.why)) : "") +
@@ -111,7 +118,11 @@ function render(s) {
       const target = p.on_reject || p.id, rejectFirst = ho && ho.data.verdict === "reject";
       const bApprove = '<button class="' + (rejectFirst ? "" : "primary") + '" onclick="decide(' + a.id + ',\\'approve\\')">' + (rejectFirst ? "仍然通过" : "批准，继续") + "</button>";
       const bReject = '<button class="' + (rejectFirst ? "primary" : "danger") + '" onclick="decide(' + a.id + ',\\'reject\\')">' + (rejectFirst ? "确认打回" : "打回") + "到「" + esc(target) + "」</button>";
-      h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + (ho ? handoffBody(ho) : "") +
+      let fb = null;
+      try { fb = a.feedback ? JSON.parse(a.feedback) : null; } catch (e) { fb = { user_requirements: [a.feedback], blocking: [], observations: [] }; }
+      const fbHtml = fb && (fb.user_requirements.length || fb.blocking.length)
+        ? '<div style="margin-bottom:8px"><div class=mute>本轮依据（来自「' + esc(fb.from_stage || "") + '」的打回）</div>' + list(fb.user_requirements.concat(fb.blocking)) + "</div>" : "";
+      h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + fbHtml + (ho ? handoffBody(ho) : "") +
         '<textarea id="note-' + a.id + '" data-keep rows="2" style="margin-top:10px" placeholder="备注（可选）：批准时会带给下一阶段，打回时作为修改意见"></textarea>' +
         '<div class="row" style="margin-top:8px">' + (rejectFirst ? bReject + bApprove : bApprove + bReject) + "</div></div>";
     }
@@ -123,7 +134,10 @@ function render(s) {
 
   const bell = { "claude-socket": "Claude 消息注入", "codex-hook": "Codex Stop hook", poll: "轮询" };
   h += '<div class="card"><h2>成员</h2><table><tr><th>agent</th><th>负责</th><th>状态</th><th>门铃</th><th>信件</th><th>上次活动</th><th>发消息</th></tr>' +
-    s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) + "</td><td><small>" +
+    s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) +
+      (a.binding ? '<br><small class="mute" title="绑定的会话 ' + esc(a.binding.session) + '">绑定于 ' + t(a.binding.since) +
+        (a.binding.open ? "" : "（连接已断）") + ' <a href="#" onclick="releaseAgent(\\'' + esc(a.id) + '\\');return false">释放</a></small>' : "") +
+      "</td><td><small>" +
       esc(bell[a.doorbell] || a.doorbell) + (a.doorbell === "poll" ? "" : a.doorbellArmed ? ' <span class="s-working">●</span>' : ' <span class="mute">○</span>') +
       (a.doorbellError ? '<br><span class="err">' + esc(a.doorbellError) + "</span>" : "") + "</small></td><td><small>" +
       (a.pendingMail ? "未取 " + a.pendingMail : "") + (a.stuckMail ? ' <span class="err">送不到 ' + a.stuckMail + "</span>" : "") +

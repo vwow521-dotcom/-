@@ -11,6 +11,9 @@ const StageSchema = z.object({
   gate: z.boolean().default(false),
   on_reject: z.string().optional(),
   instructions: z.string().optional(),
+  // Files this stage is responsible for (globs, relative to the project). Advisory: another stage
+  // touching them is flagged on the approval card, not blocked.
+  owns: z.array(z.string()).optional(),
 });
 
 const ConfigSchema = z
@@ -43,7 +46,14 @@ const ConfigSchema = z
       })
       .default({ ring_retry_seconds: 120, max_rings: 3, ack_timeout_seconds: 600 }),
     notify: z.object({ enabled: z.boolean().default(true) }).default({ enabled: true }),
-    git: z.object({ auto_commit: z.boolean().default(true) }).default({ auto_commit: true }),
+    git: z
+      .object({
+        auto_commit: z.boolean().default(true),
+        // A handoff that changed nothing but carries a review verdict still gets an (empty) commit,
+        // so review conclusions show up in `git log`.
+        commit_reviews: z.boolean().default(true),
+      })
+      .default({ auto_commit: true, commit_reviews: true }),
   })
   .superRefine((c, ctx) => {
     const ids = new Set<string>();
@@ -68,6 +78,7 @@ pipeline:
     agent: claude
     gate: true
     instructions: 把目标细化成可执行的设计说明和验收标准，写进项目文件，交接单里列出关键决策。
+    owns: [PLAN.md, "docs/**", "doc/**"]
   - id: implement
     role: 编码
     agent: codex
@@ -77,7 +88,7 @@ pipeline:
     agent: claude
     gate: true
     on_reject: implement
-    instructions: 对照验收标准逐项实测。交接单的 verdict 填 approve 或 reject，review_comments 写具体问题。
+    instructions: 对照验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
 `;
 
 export function loadConfig(projectDir: string): Config {

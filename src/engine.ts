@@ -7,8 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Config, Stage } from "./config.js";
-import type { Attempt, HandoffData, Mail, MailKind, Run, Store } from "./store.js";
-import { commitAll } from "./git.js";
+import type { Attempt, Feedback, HandoffData, Mail, MailKind, Run, Store } from "./store.js";
+import { changedFiles, commitAll, globMatch } from "./git.js";
 
 export type DoorbellKind = "claude-socket" | "codex-hook" | "poll";
 export type PresenceStatus = "working" | "armed" | "waiting" | "idle" | "stale" | "offline" | "never-joined";
@@ -16,6 +16,7 @@ export type PresenceStatus = "working" | "armed" | "waiting" | "idle" | "stale" 
 interface Presence {
   id: string;
   sessionId?: string; // the one MCP session allowed to act as this agent
+  boundAt?: number;
   lastSeenAt?: number; // last tool call from the bound session
   registeredDoorbell?: DoorbellKind; // what the proxy / hook registered (used when config says auto)
   doorbellSeenAt?: number; // last time a doorbell long-poll was open
@@ -138,14 +139,26 @@ export class Engine {
     const boundElsewhere = p.sessionId && p.sessionId !== sessionId && this.isSessionOpen(p.sessionId) && st !== "offline";
     if (boundElsewhere && !takeover) {
       this.log("join_rejected", { agent, session: sessionId, boundTo: p.sessionId });
-      return err(
-        `身份 ${agent} 已有一个在线会话。你很可能拿错了启动提示词，请确认自己的身份（可选：${this.agentIds().join(", ")}）。如果确实要替换原会话，用 takeover=true 重新 join。`,
-      );
+      const idleS = p.lastSeenAt ? Math.round((Date.now() - p.lastSeenAt) / 1000) : null;
+      const releaseIn = idleS === null ? null : Math.max(0, this.cfg.wait.offline_after_seconds - idleS);
+      return {
+        error: `身份 ${agent} 已被另一个会话占用。你很可能拿错了启动提示词，请确认自己的身份（可选：${this.agentIds().join(", ")}）。`,
+        bound_session: p.sessionId,
+        bound_since: p.boundAt ? new Date(p.boundAt).toISOString() : null,
+        bound_session_idle_seconds: idleS,
+        auto_release_in_seconds: releaseIn,
+        options: [
+          "如果旧会话已经不用了：用 takeover=true 重新 join，立即接管。",
+          "或者请用户在面板「成员」表里点「释放」，再重新 join。",
+          releaseIn !== null ? `或者等约 ${releaseIn} 秒，旧会话无活动后会被视为离线，届时可直接 join。` : "",
+        ].filter(Boolean),
+      };
     }
     if (p.sessionId && p.sessionId !== sessionId) {
       this.mailWakers.get(agent)?.();
       this.log("join_takeover", { agent, from: p.sessionId, to: sessionId });
     }
+    if (p.sessionId !== sessionId) p.boundAt = Date.now();
     p.sessionId = sessionId;
     p.lastSeenAt = Date.now();
     if (doorbellHint === "claude-socket") {
@@ -450,22 +463,41 @@ export class Engine {
 
   // ---------- runs & stages ----------
 
+  private parseFeedback(raw: string | null): Feedback | null {
+    if (!raw) return null;
+    try {
+      const f = JSON.parse(raw);
+      if (f && Array.isArray(f.user_requirements)) return f;
+    } catch {}
+    return { kind: "rework", from_stage: "?", user_requirements: [raw], blocking: [], observations: [] }; // pre-M2b.1 text
+  }
+
   private turnPayload(run: Run, a: Attempt, resumed: boolean): Result {
     const stage = this.stage(a.stage_id);
     const handoffs = this.store.handoffs(run.id);
     const input = handoffs.at(-1) ?? null;
+    const fb = this.parseFeedback(a.feedback);
+    const fbGuide: Record<Feedback["kind"], string> = {
+      rework:
+        "这是一次返工：user_requirements（用户要求）和 blocking（阻塞问题）必须全部完成；observations（非阻塞观察）自行判断，不做也可以。只做这些要求需要的最小改动。",
+      approval_note: "用户批准上一阶段时附了要求（user_requirements），请一并满足。",
+      carried:
+        "本轮是返工后的复审：重点核对 user_requirements 和 blocking 是否都已满足，同时回归原有验收标准。",
+    };
+    const owned = this.cfg.pipeline.filter((s) => s.owns?.length).map((s) => `${s.id}：${s.owns!.join("、")}`);
     return {
       resumed,
       run: { id: run.id, goal: run.goal },
-      stage: { id: stage.id, role: stage.role, instructions: stage.instructions ?? null, needs_approval: stage.gate },
-      feedback: a.feedback,
+      stage: { id: stage.id, role: stage.role, instructions: stage.instructions ?? null, needs_approval: stage.gate, owns: stage.owns ?? [] },
+      feedback: fb,
       input_handoff: input && { from: `${input.agent}/${input.stage_id}`, commit: input.commit_sha, ...input.data },
       earlier_handoffs: handoffs.slice(0, -1).map((h) => `${h.agent}/${h.stage_id}：${h.data.summary}`),
       instructions:
         (resumed ? "这是你之前领到但还没提交的阶段，请继续完成。" : "") +
-        `你现在负责阶段「${stage.id}：${stage.role}」。完成后调用 submit_handoff。` +
-        (a.feedback ? "注意 feedback 字段里有用户或审查者的反馈，必须先处理。" : "") +
-        (stage.on_reject ? "这是审查阶段：交接单的 verdict 填 approve 或 reject，review_comments 列出具体问题。" : ""),
+        `你现在负责阶段「${stage.id}：${stage.role}」。完成后调用 submit_handoff，并在 files_changed 里列全你改动的文件。` +
+        (fb ? fbGuide[fb.kind] : "") +
+        (owned.length ? `文件分工（${owned.join("；")}）：改动其他阶段负责的文件时，请在交接单 notes_for_next 里说明原因。` : "") +
+        (stage.on_reject ? "这是审查阶段：verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。" : ""),
     };
   }
 
@@ -517,13 +549,13 @@ export class Engine {
     return { ok: true };
   }
 
-  private assign(run_id: number, stage: Stage, feedback: string | null) {
-    const a = this.store.createAttempt(run_id, stage.id, stage.agent, feedback);
+  private assign(run_id: number, stage: Stage, feedback: Feedback | null) {
+    const a = this.store.createAttempt(run_id, stage.id, stage.agent, feedback ? JSON.stringify(feedback) : null);
     this.log("stage_assigned", { run: run_id, stage: stage.id, agent: stage.agent, attempt: a.id, agentStatus: this.status(stage.agent) });
     this.sendTaskMail(run_id, a);
   }
 
-  private advance(run: Run, fromStage: string, feedback: string | null) {
+  private advance(run: Run, fromStage: string, feedback: Feedback | null) {
     const i = this.cfg.pipeline.findIndex((s) => s.id === fromStage);
     const next = this.cfg.pipeline[i + 1];
     if (!next) {
@@ -546,18 +578,39 @@ export class Engine {
       return err("当前没有分配给你、正在进行的阶段，不能提交。请先调用 fetch_inbox 看有没有任务信。");
     const stage = this.stage(a.stage_id);
 
+    // Scope check before committing: undeclared changes and files owned by another stage are flagged.
+    const changed = await changedFiles(this.cfg.projectDir);
+    const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    const declared = new Set(data.files_changed.map(norm));
+    const scope_notes: string[] = [];
+    const undeclared = data.files_changed.length ? changed.filter((f) => !declared.has(norm(f))) : [];
+    if (undeclared.length) scope_notes.push(`改动了但没在交接单里声明：${undeclared.join("、")}`);
+    for (const other of this.cfg.pipeline) {
+      if (other.id === stage.id || !other.owns?.length || stage.owns?.some((g) => other.owns!.includes(g))) continue;
+      const hit = changed.filter((f) => other.owns!.some((g) => globMatch(g, f)) && !stage.owns?.some((g) => globMatch(g, f)));
+      if (hit.length) scope_notes.push(`改动了「${other.id}」阶段负责的文件：${hit.join("、")}`);
+    }
+
     let commit_sha: string | null = null;
     let commit_error: string | null = null;
     if (this.cfg.git.auto_commit) {
-      const subject = `[bridge] ${stage.id} by ${agent}: ${data.summary}`.slice(0, 120);
-      const body = `run #${run.id}: ${run.goal}\n\n${data.notes_for_next}`.slice(0, 4000);
-      const r = await commitAll(this.cfg.projectDir, subject, body);
+      const verdictText = data.verdict === "approve" ? "审查通过 — " : data.verdict === "reject" ? "审查打回 — " : "";
+      const subject = `[bridge] ${stage.id} by ${agent}: ${verdictText}${data.summary}`.slice(0, 120);
+      const bodyParts = [`run #${run.id}: ${run.goal}`];
+      if (data.review_comments?.length) bodyParts.push("阻塞问题：\n- " + data.review_comments.join("\n- "));
+      if (data.observations?.length) bodyParts.push("观察：\n- " + data.observations.join("\n- "));
+      if (data.notes_for_next) bodyParts.push(data.notes_for_next);
+      if (scope_notes.length) bodyParts.push("范围提示：\n- " + scope_notes.join("\n- "));
+      const r = await commitAll(this.cfg.projectDir, subject, bodyParts.join("\n\n").slice(0, 6000), {
+        allowEmpty: !!data.verdict && this.cfg.git.commit_reviews,
+      });
       if ("sha" in r) commit_sha = r.sha;
       else if ("error" in r) commit_error = r.error;
       else commit_error = `未提交：${r.skipped}`;
     }
 
-    const h = this.store.addHandoff({ run_id: run.id, attempt_id: a.id, stage_id: stage.id, agent, data, commit_sha, commit_error });
+    const h = this.store.addHandoff({ run_id: run.id, attempt_id: a.id, stage_id: stage.id, agent, data, commit_sha, commit_error, scope_notes });
+    if (scope_notes.length) this.event(run.id, agent, "scope", `「${stage.id}」交接的范围提示：${scope_notes.join("；")}`);
     this.store.setMailStatus(this.store.taskMailFor(a.id).filter((m) => m.status !== "void").map((m) => m.id), "acked");
     const ended = new Date().toISOString();
     this.presence.get(agent)!.lastReturnAt = Date.now();
@@ -573,7 +626,9 @@ export class Engine {
       return { status: "submitted", commit: commit_sha, commit_note: commit_error, next: "等待用户在面板上审批", instructions: "已提交。" + after };
     }
     this.store.updateAttempt(a.id, { status: "done", handoff_id: h.id, ended_at: ended });
-    this.advance(run, stage.id, null);
+    // A rework round's requirements travel on, so the next reviewer knows what this round was for.
+    const fb = this.parseFeedback(a.feedback);
+    this.advance(run, stage.id, fb && fb.kind !== "approval_note" ? { ...fb, kind: "carried" } : null);
     const nextLive = this.store.liveAttempt(run.id);
     return {
       status: "submitted",
@@ -596,34 +651,67 @@ export class Engine {
 
     if (action === "approve") {
       this.event(run.id, null, "gate", `你批准了「${stage.id}」${trimmed ? "：" + trimmed : ""}`);
-      this.advance(run, stage.id, trimmed ? `用户批准「${stage.id}」时的备注：${trimmed}` : null);
+      this.advance(
+        run,
+        stage.id,
+        trimmed ? { kind: "approval_note", from_stage: stage.id, user_requirements: [trimmed], blocking: [], observations: [] } : null,
+      );
     } else {
       const target = this.stage(stage.on_reject ?? stage.id);
-      const parts = [`「${stage.id}」被打回到「${target.id}」。`];
-      if (trimmed) parts.push(`用户意见：${trimmed}`);
-      if (h?.data.review_comments?.length) parts.push("审查意见：\n- " + h.data.review_comments.join("\n- "));
+      const comments = h?.data.review_comments ?? [];
+      const rejected = h?.data.verdict === "reject";
+      // Review comments are blocking only when the reviewer itself rejected; otherwise they are observations.
+      const fb: Feedback = {
+        kind: "rework",
+        from_stage: stage.id,
+        user_requirements: trimmed ? [trimmed] : [],
+        blocking: rejected ? comments : [],
+        observations: [...(rejected ? [] : comments), ...(h?.data.observations ?? [])],
+      };
       this.event(run.id, null, "gate", `你打回了「${stage.id}」→「${target.id}」${trimmed ? "：" + trimmed : ""}`);
       this.store.setRunStatus(run.id, "active");
-      this.assign(run.id, target, parts.join("\n"));
+      this.assign(run.id, target, fb);
     }
     return { ok: true };
   }
 
   // ---------- context, progress, notes, questions ----------
 
-  getContext(agent: string, sessionId: string | undefined): Result {
+  getContext(agent: string, sessionId: string | undefined, lastN = 3): Result {
     const be = this.bindingError(agent, sessionId);
     if (be) return err(be);
     const run = this.store.openRun();
+    const handoffs = run ? this.store.handoffs(run.id) : [];
+    const n = Math.max(0, Math.min(lastN, handoffs.length));
+    const live = run ? this.store.liveAttempt(run.id) : undefined;
     return {
       run: run ? { id: run.id, goal: run.goal, status: run.status } : null,
+      current_round: live ? { stage: live.stage_id, agent: live.agent, status: live.status, feedback: this.parseFeedback(live.feedback) } : null,
       stages: run
-        ? this.store.attempts(run.id).map((a) => ({ stage: a.stage_id, agent: a.agent, status: a.status, feedback: a.feedback, gate_note: a.decided_note }))
+        ? this.store.attempts(run.id).map((a) => ({ stage: a.stage_id, agent: a.agent, status: a.status, gate_note: a.decided_note }))
         : [],
-      handoffs: run ? this.store.handoffs(run.id).map((h) => ({ from: `${h.agent}/${h.stage_id}`, commit: h.commit_sha, at: h.created_at, ...h.data })) : [],
+      handoffs_total: handoffs.length,
+      older_handoffs: handoffs.slice(0, handoffs.length - n).map((h) => `${h.agent}/${h.stage_id}：${h.data.summary}`),
+      recent_handoffs: handoffs.slice(handoffs.length - n).map((h) => ({ from: `${h.agent}/${h.stage_id}`, commit: h.commit_sha, at: h.created_at, ...h.data })),
       notes: this.store.notes().map((n) => ({ topic: n.topic, by: n.agent, text: n.text, at: n.created_at })),
       project_dir: this.cfg.projectDir,
     };
+  }
+
+  /** Free an identity: from the panel (human) or the agent itself via `leave`. */
+  release(agent: string, by: "human" | "agent", sessionId?: string): Result {
+    const p = this.presence.get(agent);
+    if (!p) return err("未知 agent");
+    if (by === "agent") {
+      const be = this.bindingError(agent, sessionId);
+      if (be) return err(be);
+    }
+    const old = p.sessionId;
+    p.sessionId = undefined;
+    this.mailWakers.get(agent)?.();
+    this.log("identity_released", { agent, by, session: old });
+    this.event(null, agent, "join", `${agent} 的身份已释放（${by === "human" ? "你在面板上操作" : "它自己退出"}）`);
+    return { ok: true, released_session: old ?? null };
   }
 
   reportProgress(agent: string, sessionId: string | undefined, text: string): Result {
@@ -712,6 +800,14 @@ export class Engine {
         doorbell: this.doorbellKind(id),
         doorbellArmed: this.doorbellArmed(id),
         doorbellError: p.doorbellError ?? null,
+        binding: p.sessionId
+          ? {
+              session: p.sessionId.slice(0, 8),
+              since: p.boundAt ? new Date(p.boundAt).toISOString() : null,
+              open: this.isSessionOpen(p.sessionId),
+              autoReleaseAt: p.lastSeenAt ? new Date(p.lastSeenAt + this.cfg.wait.offline_after_seconds * 1000).toISOString() : null,
+            }
+          : null,
         pendingMail: pending.length,
         stuckMail: pending.filter((m) => m.status === "stuck").length,
         unackedMail: unacked.length,

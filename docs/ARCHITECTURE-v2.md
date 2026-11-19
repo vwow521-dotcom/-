@@ -209,3 +209,17 @@ S1 成功，Claude 一侧就彻底不用轮询。S2 不论结果如何，Codex �
 3. **（待改）刚 join 就按铃是多余的**：join 协议本来就让 AI 先 `fetch_inbox`，所以刚 join 就按的那一声铃会多出一个空回合。计划：join 后留 15 秒宽限期，期间不按铃。
 4. **（模型行为）回答状态不新鲜**：Claude 被问「还在线吗」时说"规划等你批准"，实际上已经批准过。可以考虑在 `[协作桥]` 叫醒消息或 `fetch_inbox` 结果里附上一行当前任务状态。
 5. **（偏好）交接单语言**：Codex 用英文写摘要。在启动提示词里加"交接单用中文"即可。
+
+## 12. M2b.1：按两边 AI 的反馈改进（2026-11-19）
+
+反复打回测试（MultiAiTestProj，4 次打回全部自动流转）之后，Claude 和 Codex 各自提了意见，落实如下：
+
+| 来源 | 反馈 | 改动 |
+|---|---|---|
+| Claude | 返工后的复审任务里 `feedback` 是空的，要翻 `get_context` 才知道这轮用户要什么 | 返工阶段完成后，它的反馈以 `kind: "carried"` 原样带进下一次审查 |
+| Codex | 用户要求、阻塞问题、非阻塞观察混在一个字段里 | `feedback` 改为结构化：`user_requirements`（必须做）、`blocking`（必须修）、`observations`（可选）。审查交接单新增 `observations` 字段；`review_comments` 只写阻塞问题。只有审查结论是 reject 时，`review_comments` 才算 blocking |
+| Claude | `get_context` 越来越长 | 默认只返回最近 3 份完整交接单（`last_n` 可调），更早的只给一句摘要；新增 `current_round` |
+| Claude | 审查没有提交，`git log` 看不到结论 | 带 verdict 的交接即使没改文件也生成空提交，标题带"审查通过 / 审查打回"，正文列出阻塞问题和观察（`git.commit_reviews`） |
+| Claude | 编码阶段也改了 PLAN.md | 阶段可声明 `owns`（默认规划阶段负责 `PLAN.md`、`docs/**`、`doc/**`）；其他阶段改了这些文件时，审批卡片显示范围提示（不阻止） |
+| Codex | 自动提交可能带上不相关的改动 | 提交前用 `files_changed` 核对实际改动，没声明的文件列进范围提示（卡片 + 提交正文） |
+| Codex | 身份被占用时只能干等重试 | join 被拒时返回旧会话的空闲秒数、预计自动释放时间和可选做法；面板成员表显示绑定时间和「释放」按钮；新增 `leave` 工具 |
