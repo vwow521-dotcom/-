@@ -12,7 +12,7 @@
 需要 Node.js 22.13 或更新版本，以及 Git。在 PowerShell 中运行：
 
 ```powershell
-git clone https://github.com/vwow521-dotcom/-.git Interaction-ai
+git clone https://github.com/vwow521-dotcom/Interaction-ai.git
 cd Interaction-ai
 npm ci
 npm pack
