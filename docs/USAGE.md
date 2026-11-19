@@ -37,7 +37,7 @@ Claude 必须通过转接程序 `bin/bridge-mcp.mjs` 接入，门铃才能用。
 
 ## 3. Codex：安装 Stop hook（每个目标项目一次）
 
-1. Codex 里 `bridge` 这个 MCP 服务器保持现在的配置（HTTP，`http://127.0.0.1:7878/mcp`）。
+1. Codex 的 `bridge` 也用本地转接程序（在 `~/.codex/config.toml` 里：`[mcp_servers.bridge]`、`command = "node"`、`args = ["E:/Interaction-ai/bin/bridge-mcp.mjs"]`）。这样桥没启动时 Codex 也能拿到占位工具，桥起来后自动换成真实工具，不用在意启动顺序。若改用 HTTP 直连，就必须**先启动桥再开 Codex 对话**，否则这个对话拿不到 bridge 工具，hook 也认不出它。
 2. 把 [bin/codex-hooks.example.json](../bin/codex-hooks.example.json) 复制到目标项目的 `.codex/` 目录，**并改名为 `hooks.json`**（Codex 只认这个文件名）。注意：桥每次交接都会 `git add -A`，`.codex/hooks.json` 会被一起提交进目标项目；不想提交就把 `.codex/` 加进 `.gitignore`。
 3. 在 Codex 里信任这个项目，并在 **Settings > Hooks**（或输入框旁的 **Review hooks**）里信任这个 hook。
 
@@ -45,6 +45,7 @@ Claude 必须通过转接程序 `bin/bridge-mcp.mjs` 接入，门铃才能用。
 
 - 你想直接和它说话：先点停止，再输入，跟平常一样秒回。或者在面板上给它发消息，不需要点停止。
 - 停靠满 10 分钟还没有信时，Codex 会回一句「待命」，然后重新停靠（心跳）。不想要心跳，就设环境变量 `BRIDGE_HEARTBEAT=0`。
+- 重启桥（关掉终端再 `npm start`）不会把停靠的 Codex 弄丢：hook 会在 90 秒内反复重连；桥一直没回来，才放 Codex 结束这一轮。Claude 一侧由转接程序自动重连。
 
 ## 4. 启动提示词
 

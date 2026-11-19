@@ -9,13 +9,17 @@
 //
 // Env: BRIDGE_URL (default http://127.0.0.1:7878), BRIDGE_PARK_SECONDS (default 600; keep it below the
 // hook "timeout" in hooks.json), BRIDGE_HEARTBEAT=0 to let Codex stop instead of re-parking after a
-// quiet park window, BRIDGE_MCP_NAME (default "bridge": the MCP server name used in Codex's config).
+// quiet park window, BRIDGE_MCP_NAME (default "bridge": the MCP server name used in Codex's config),
+// BRIDGE_DOWN_GRACE_SECONDS (default 90): how long to keep retrying while the daemon is unreachable, so
+// restarting the bridge doesn't release a parked Codex. A daemon that never comes back still lets Codex go.
 import fs from "node:fs";
 
 const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:7878").replace(/\/$/, "");
 const PARK_MS = Number(process.env.BRIDGE_PARK_SECONDS ?? 600) * 1000;
 const HEARTBEAT = process.env.BRIDGE_HEARTBEAT !== "0";
 const SERVER = process.env.BRIDGE_MCP_NAME ?? "bridge";
+const DOWN_GRACE_MS = Number(process.env.BRIDGE_DOWN_GRACE_SECONDS ?? 90) * 1000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // On Windows, writes to a pipe are asynchronous: exiting right after write() can drop the output, and
 // Codex then sees an empty answer and simply stops. Exit only once the write has been flushed.
@@ -60,28 +64,38 @@ process.stdin.on("end", async () => {
   const agent = joinedAgent(ev.transcript_path);
   if (!agent) return out({}); // not a bridge worker thread: behave as if there were no hook
 
-  try {
-    await fetch(`${BASE}/api/codex/thread`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session_id: ev.session_id, agent }),
-    });
-  } catch {
-    return out({}); // daemon not running: don't hold Codex
-  }
+  // The daemon may be restarting: tolerate it being unreachable for up to DOWN_GRACE_MS in a row.
+  let downSince = null;
+  const unreachable = async () => {
+    downSince ??= Date.now();
+    if (Date.now() - downSince > DOWN_GRACE_MS) return true; // gone for good: let Codex stop
+    await sleep(2000);
+    return false;
+  };
 
+  let registered = false;
   const start = Date.now();
   while (Date.now() - start < PARK_MS) {
-    const remaining = Math.ceil((PARK_MS - (Date.now() - start)) / 1000);
-    let j;
     try {
-      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=codex-hook&timeout=${Math.min(50, remaining)}`);
-      if (!r.ok) return out({});
-      j = await r.json();
+      if (!registered) {
+        await fetch(`${BASE}/api/codex/thread`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ session_id: ev.session_id, agent }),
+        });
+        registered = true;
+      }
+      const remaining = Math.ceil((PARK_MS - (Date.now() - start)) / 1000);
+      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=codex-hook&timeout=${Math.max(1, Math.min(50, remaining))}`);
+      if (r.status >= 500) throw new Error("HTTP " + r.status);
+      if (!r.ok) return out({}); // e.g. this agent no longer exists in the bridge's config
+      const j = await r.json();
+      downSince = null;
+      if (j.ring) return out({ decision: "block", reason: j.text });
     } catch {
-      return out({}); // daemon went away
+      registered = false; // re-register after the daemon comes back (its in-memory state is new)
+      if (await unreachable()) return out({});
     }
-    if (j.ring) return out({ decision: "block", reason: j.text });
   }
   if (HEARTBEAT)
     return out({

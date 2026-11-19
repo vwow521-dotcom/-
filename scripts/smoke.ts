@@ -263,6 +263,26 @@ try {
   await sleep(9000);
   s = await state();
   check(s.mail.find((m: any) => m.to === "hbot3")?.status === "stuck" && s.agents.find((a: any) => a.id === "hbot3").stuckMail === 1, "undeliverable mail → stuck + attention banner");
+
+  // Bridge restart while Codex is parked: the hook rides it out and still delivers.
+  const survivor = runHook({ session_id: "s-3", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "60", BRIDGE_DOWN_GRACE_SECONDS: "30" });
+  await sleep(1500);
+  await stopDaemon();
+  await sleep(3000);
+  await startDaemon();
+  await sleep(4000); // hook retries every 2 s
+  check((await state()).agents.find((a: any) => a.id === "hbot2").doorbellArmed, "parked hook re-armed after bridge restart");
+  await api("/api/mail", { to: "hbot2", text: "重启后的信" });
+  h = await survivor;
+  check(JSON.parse(h.out).decision === "block", "mail after restart still wakes the parked Codex");
+
+  // Bridge gone for good: after the grace period the hook lets Codex stop.
+  const orphan = runHook({ session_id: "s-4", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "60", BRIDGE_DOWN_GRACE_SECONDS: "3" });
+  await sleep(1500);
+  await stopDaemon();
+  h = await orphan;
+  check(h.out === "{}" && h.ms < 15000, `bridge gone for good → Codex released after grace (${h.ms} ms)`);
+  await startDaemon();
 } catch (e) {
   console.error(e);
   failed = true;
