@@ -92,17 +92,21 @@ export function buildServer(engine: Engine): McpServer {
     {
       title: "在聊天里发言",
       description:
-        "在项目聊天室里说一句话，用户在面板上能看到。回答 chat 信时带上 reply_to。用 mentions（或正文里的 @名字）叫醒其他成员；不 @ 任何人就只给用户看。" +
-        "交付工作用 submit_handoff，正式协调用 send_mail，聊天只用来简短交流。",
+        "在项目聊天室里说一句话，用户在面板上能看到。回答 chat 信时带上 reply_to。" +
+        "会被叫醒的人：mentions（或正文里的 @名字）点到的成员，加上 reply_to 那条消息的作者（如果是成员）。回复用户、又没有 @ 任何成员时，只给用户看。" +
+        "wake=false 时谁都不叫醒，适合收住话题（如「就聊到这儿」）。成员之间连续聊 " +
+        engine.cfg.chat.max_agent_turns +
+        " 条、用户都没插话时，桥会停止叫醒，等用户说话。交付工作用 submit_handoff，正式协调用 send_mail，聊天只用来简短交流。",
       inputSchema: {
         agent_id: agentId,
         text: z.string().describe("要说的话，简短"),
         mentions: z.array(z.string()).optional().describe(`要叫醒的成员，可选：${ids}，或 all`),
         reply_to: z.number().int().optional().describe("回复哪条聊天消息（chat 信里的 message_id）"),
+        wake: z.boolean().optional().describe("默认 true；false 时只记在聊天里，不叫醒任何人"),
       },
     },
-    async ({ agent_id, text: t, mentions, reply_to }, extra) =>
-      withAgent(agent_id, extra.sessionId, () => engine.chat.say(agent_id, extra.sessionId, t, mentions ?? [], reply_to)),
+    async ({ agent_id, text: t, mentions, reply_to, wake }, extra) =>
+      withAgent(agent_id, extra.sessionId, () => engine.chat.say(agent_id, extra.sessionId, t, mentions ?? [], reply_to, wake ?? true)),
   );
 
   server.registerTool(

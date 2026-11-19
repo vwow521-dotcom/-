@@ -63,6 +63,8 @@ Codex：
 
 `join` 会告诉 AI 它用的是哪种门铃、该怎么等信。门铃按 `bridge.config.yaml` 里成员的 `product` 自动选择（`doorbell: auto`）：Codex 依次用「Codex 队列消息 → Codex Stop hook → 轮询」，Claude 依次用「Claude 消息注入 → 轮询」。前一个按了铃 30 秒没动静，桥会换下一个，都不行再通知你。面板「成员」表的门铃一栏悬停可以看到完整顺序。
 
+桥重启后，在 Codex 重新 join（或在原对话里结束一轮）之前，桥不会用队列消息叫醒它，免得叫醒你已经不用的旧对话。这期间给它的信会等着，太久没人取会提示你去叫醒。
+
 **旧项目要改一行配置：** 0.4 及以前生成的 `bridge.config.yaml` 里写的是 `codex: { product: codex, doorbell: codex-hook }`，这样只会用 Stop hook。改成 `doorbell: auto` 才会用上队列消息。
 
 Codex 第一次加入后，要等它结束一轮，hook 才能登记它的对话 ID；在这之前来的信会先排着，登记后立刻送达。

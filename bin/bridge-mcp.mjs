@@ -225,7 +225,7 @@ async function ringLoop(agent, signal) {
 const server = new Server({ name: "bridge", version: "0.2.0" }, { capabilities: { tools: { listChanged: true } } });
 const OFFLINE_TOOL = {
   name: "bridge_offline",
-  description: "协作桥守护进程没有运行。调用它查看如何启动。",
+  description: "协作桥守护进程没有运行。调用它查看如何启动。桥启动后工具列表会刷新：如果你是在找 join 等协作桥工具，请重新搜索或列出工具，不要调用这个。",
   inputSchema: { type: "object", properties: {} },
 };
 
@@ -244,7 +244,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   let args = req.params.arguments ?? {};
   if (name === OFFLINE_TOOL.name)
     return {
-      content: [{ type: "text", text: `协作桥没有运行（${BASE}）。请让用户在 E:\\Interaction-ai 里运行：npm start -- --project <项目目录>，然后重新调用 join。` }],
+      content: [{ type: "text", text: `协作桥没有运行（${BASE}）。请让用户运行：ai-bridge start <项目目录>。桥启动后工具列表会自动刷新，重新搜索或列出工具就能看到 join 等工具，再调用 join。` }],
       isError: true,
     };
   if (name === "join") {

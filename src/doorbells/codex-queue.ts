@@ -15,6 +15,9 @@ import type { Doorbell, DoorbellContext, RingOutcome, Wake } from "./types.js";
 
 export const CODEX_THREAD = "codex-thread"; // endpoint kind
 
+// Registrations from before this daemon started may belong to a conversation the user has since replaced.
+const STARTED_AT = Date.now();
+
 const codexHome = () => process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 
 /** Numeric-aware compare of release directory names like 0.170.0-x86_64-pc-windows-msvc. */
@@ -66,14 +69,16 @@ export class CodexQueueDoorbell implements Doorbell {
   }
 
   /**
-   * The registered thread, unless the agent joined from a new session after it was registered (likely a
-   * new conversation: wait for its first Stop hook rather than wake the old one).
+   * The registered thread, unless it was registered before the agent's current binding (it joined from a
+   * new session — likely a new conversation) or, when it hasn't joined since, before this daemon started
+   * (the user may have opened a new conversation meanwhile). Either way: wait for the Stop hook to
+   * register again rather than wake a conversation that may be stale.
    */
   thread(agent: string): string | null {
     const ep = this.ctx.store.endpoint(agent, CODEX_THREAD);
     if (!ep) return null;
-    const bound = this.ctx.boundAt(agent);
-    if (bound && Date.parse(ep.registered_at) < bound - 1000) return null;
+    const since = this.ctx.boundAt(agent) ?? STARTED_AT;
+    if (Date.parse(ep.registered_at) < since - 1000) return null;
     return ep.address;
   }
 

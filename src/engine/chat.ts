@@ -41,7 +41,7 @@ export class Chat {
   }
 
   /** Post a message from the human or an agent. Mentioned agents (never the sender) get a chat mail. */
-  post(from: string, text: string, explicit: string[] = [], replyTo?: number): Result {
+  post(from: string, text: string, explicit: string[] = [], replyTo?: number, wake = true): Result {
     const body = text.trim();
     if (!body) return err("消息不能为空");
     const reply = replyTo ? this.ctx.store.chatMessage(replyTo) : undefined;
@@ -50,7 +50,8 @@ export class Chat {
     if (unknown.length) return err(`未知成员：${unknown.join("、")}。可选：${this.presence.agentIds().join(", ")}`);
     // Replying to another agent's message reaches that agent without an explicit @.
     if (reply && reply.from_agent !== "human" && !named.includes(reply.from_agent)) named.push(reply.from_agent);
-    const mentions = named.filter((a) => a !== from);
+    // wake=false: say it in the room (e.g. closing a topic) without waking anyone.
+    const mentions = wake ? named.filter((a) => a !== from) : [];
     if (from === "human" && !mentions.length) return err("用 @ 指定要发给谁，例如 @claude，或 @all 发给所有人");
 
     // Agents talking among themselves without the human: stop waking each other after max_agent_turns.
@@ -100,10 +101,10 @@ export class Chat {
   }
 
   /** `say` from an agent. */
-  say(agent: string, sessionId: string | undefined, text: string, mentions: string[] = [], replyTo?: number): Result {
+  say(agent: string, sessionId: string | undefined, text: string, mentions: string[] = [], replyTo?: number, wake = true): Result {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
-    return this.post(agent, text, mentions, replyTo);
+    return this.post(agent, text, mentions, replyTo, wake);
   }
 
   private view(m: ChatMessage) {
@@ -125,6 +126,7 @@ export class Chat {
       earlier: this.ctx.store.recentChat(this.ctx.cfg.chat.history, m.id).map((x) => this.view(x)),
       instructions:
         "这是聊天消息，不需要 ack。需要回答时调用 say（reply_to=" + m.id + "）；只是知会你、不需要回答时什么都不用做。" +
+        (m.from_agent !== "human" ? "回复成员的消息会叫醒对方；想收住话题、不再叫醒对方时，say 带 wake=false。" : "") +
         "回答要简短。手上有任务时先把任务做完再处理聊天，不要因为聊天中断任务。",
     };
   }

@@ -184,8 +184,10 @@ try {
   const back = await call(claude, "say", { agent_id: "claude", text: "好的", reply_to: said.message_id });
   check(JSON.stringify(back.delivered_to) === '["codex"]', "replying to an agent's message reaches it without @");
   check((await call(claude, "say", { agent_id: "claude", text: "只给用户看" })).delivered_to.length === 0, "say without mentions is for the human only");
+  const quiet = await call(claude, "say", { agent_id: "claude", text: "就聊到这儿", reply_to: said.message_id, wake: false });
+  check(quiet.ok && quiet.delivered_to.length === 0, "say wake=false replies without waking the author");
   let muted: any;
-  for (let i = 0; i < 4; i++) muted = await call(claude, "say", { agent_id: "claude", text: "@codex 再聊一句 " + i });
+  for (let i = 0; i < 6 && !muted?.muted; i++) muted = await call(claude, "say", { agent_id: "claude", text: "@codex 再聊一句 " + i });
   check(muted.muted?.[0] === "codex" && muted.delivered_to.length === 0, "agents stop waking each other after max_agent_turns without the human");
   check((await call(codex, "get_context", { agent_id: "codex" })).chat.some((x: any) => x.text === "只给用户看"), "get_context includes recent chat");
   await call(codex, "fetch_inbox", { agent_id: "codex" }); // drain the chat mail
@@ -726,6 +728,19 @@ try {
   await call(qbot, "fetch_inbox", { agent_id: "qbot" });
   const qtrace = fs.readFileSync(path.join(proj, ".bridge", "bridge-log.jsonl"), "utf8");
   check(qtrace.includes('"event":"codex_queue"') && qtrace.includes('"via":"codex-queue"'), "bridge log records codex queue calls and rings by doorbell");
+
+  // Bridge restart: the registered thread predates this daemon and qbot hasn't re-joined (the user may have
+  // opened a new conversation) → don't wake the old one; wait for the Stop hook to register again.
+  await stopDaemon();
+  await startDaemon();
+  const before = codexCalls().length;
+  const afterRestart = await api("/api/mail", { to: "qbot", text: "重启后、还没重新加入时来的信" });
+  await sleep(800);
+  check(codexCalls().length === before && (await state()).mail.find((m: any) => m.id === afterRestart.json.id)?.status === "queued", "after a restart, a thread registered before it is not woken");
+  h = await runHook({ session_id: "thread-q2", turn_id: "t1", stop_hook_active: false, transcript_path: qtx }, { BRIDGE_PARK_SECONDS: "20" });
+  for (let i = 0; i < 30 && codexCalls().length === before; i++) await sleep(100);
+  calls = codexCalls();
+  check(h.out === "{}" && calls.length === before + 1 && calls.at(-1)![calls.at(-1)!.indexOf("--thread") + 1] === "thread-q2", "a fresh registration after the restart is woken");
 } catch (e) {
   console.error(e);
   failed = true;
