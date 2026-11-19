@@ -254,7 +254,7 @@ S1 成功，Claude 一侧就彻底不用轮询。S2 不论结果如何，Codex �
 
 Codex 0.170 桌面版常驻一个 app-server，控制套接字在 `~/.codex/app-server-control/app-server-control.sock`，可以连上。但它是独立的托管 App Server：向桌面对话 `turn/start` 返回 `-32600: thread not found`，桌面对话保持空闲。桌面对话由桌面应用自己的 App Server 持有。让托管服务另行载入同一对话会出现两个写入者，所以不采用。**Codex 的门铃继续用 Stop hook。**
 
-### 两边 AI 的其他反馈（`MultiAiTestProj/IMPORTANT.md`，待做）
+### 两边 AI 的其他反馈（`MultiAiTestProj/IMPORTANT.md`）
 
 - 会议信每轮都附全部历史，定稿轮很大：只给上一轮全文，更早的给摘要或纪要路径。
 - `join` 返回里提示需要预加载的工具（Claude 里它们是延迟加载的）。
@@ -283,14 +283,22 @@ Codex 0.170 桌面版常驻一个 app-server，控制套接字在 `~/.codex/app-
 ```
 
 - 每个驱动实现同一组接口（`src/doorbells/types.ts`）：`possible`（能不能为这个成员服务，决定 join 怎么交代）、`available`（现在能不能送达）、`armed`、`ring`、`waitInstructions`，以及 `sessionless`（成员不需要开着的 MCP 会话也能叫醒）和 `verify`（按铃后要不要确认）。
-- 门铃顺序：`agents.<id>.doorbell` 可以写列表、单个门铃或 `auto`；`auto` 按 `product` 取默认值（`PRODUCT_DOORBELLS`）。
+- 门铃顺序：`agents.<id>.doorbell` 可以写列表、单个门铃或 `auto`；`auto` 按 `product` 取默认值（`src/products/`）。
 - 成员登记：通用的 `agent_endpoints` 表和 `POST /api/agents/:id/endpoint`，取代 `codex_threads` 和 `/api/codex/thread`（旧路由保留给旧 hook）。Codex 的 Stop hook 每轮结束时登记对话 ID；桥回答 `park:false` 时 hook 立即放行，`park:true`（找不到 codex 命令、排队失败过、配置不用队列）时 hook 照旧停靠，作为兜底。
 - 防止叫醒旧对话：成员如果在登记之后又从新的 MCP 会话加入（多半是新开的对话），旧的对话 ID 不再使用，等新对话第一次结束一轮重新登记。
 - 不重复排队：Codex 队列里已经有这个对话的消息时不再排。
 - 失败处理：`codex queue` 失败后 10 分钟内不再用它，下一次 Stop hook 会停靠作为兜底；没有别的门铃可用时立即通知你。
 
-### 还没做（下一步）
+### 产品档案与引擎拆分
 
-- 第 3 步：产品档案（`src/products/`）接管 `cli.ts` 里各产品的 setup / uninstall / doctor。`doctor` 应检查能否找到 `codex` 命令。
-- 第 4 步：把 `engine.ts` 拆成邮局、身份、调度、会议、租约几个模块。
+- 产品档案负责各产品的 setup、uninstall、doctor 和默认门铃顺序。Codex 的 doctor 检查队列门铃能否找到命令。
+
+- `engine.ts` 组装邮局（`postman`）、身份与在线状态（`presence`）、任务调度（`scheduler`）、会议（`meetings`）和租约（`leases`）。`workspace` 提供项目上下文和面板状态。
+
+## 16. 后续设计草案
+
+- **审查阶段的独立依赖**。在任务清单中为审查阶段声明前置任务及所需阶段，例如 T2 的审查等 T1 的实现交接。调度时分别检查任务依赖和阶段依赖，校验组合后的依赖图是否成环。派审查信时记录满足条件的那份交接和 SHA。上游返工后，新派发的审查引用最新有效的实现交接。
+- **任务描述勘误**。在任务卡上提供修订说明的入口，由用户填写新版本和原因。面板保留旧版本与修订记录，并给负责人和审查人发信。新任务信读取最新文本，既有交接保留它依据的版本号。
+- **共享工作区**。按运行和任务号创建 `.bridge/shared/<run>/<task>/`，借用 `.bridge/.gitignore` 排除临时脚本和样例。任务信提供项目内的相对路径，方便实现方和审查方使用同一份文件。
+- **返工复现命令**。审查交接可以随阻塞问题提供复现命令、执行目录和预期结果。审批卡展示这些信息，返工信原样带上，方便接手人复跑。
 

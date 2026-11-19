@@ -29,6 +29,11 @@ export class ParkedDoorbell implements Doorbell {
   markRegistered(agent: string) {
     this.seenAt.set(agent, this.seenAt.get(agent) ?? 0);
   }
+  disarm(agent: string) {
+    for (const finish of this.waiters.get(agent) ?? []) finish({ ring: false });
+    this.waiters.delete(agent);
+    this.seenAt.delete(agent);
+  }
   possible(agent: string) {
     return this.seenAt.has(agent) || this.couldServe(agent);
   }

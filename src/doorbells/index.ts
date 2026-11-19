@@ -1,5 +1,6 @@
 // The doorbell registry: per-agent chains and the drivers behind them.
 import type { Config } from "../config.js";
+import { products } from "../products/index.js";
 import { CODEX_THREAD, CodexQueueDoorbell } from "./codex-queue.js";
 import { ParkedDoorbell } from "./parked.js";
 import { PollDoorbell } from "./poll.js";
@@ -10,12 +11,6 @@ export { DOORBELL_KINDS } from "./types.js";
 export type { RingResult } from "./parked.js";
 export { CODEX_THREAD } from "./codex-queue.js";
 
-/** Default chains per product (config `agents.<id>.product`). "poll" always ends a chain. */
-export const PRODUCT_DOORBELLS: Record<string, DoorbellKind[]> = {
-  "claude-code": ["claude-socket", "poll"],
-  claude: ["claude-socket", "poll"],
-  codex: ["codex-queue", "codex-hook", "poll"],
-};
 /** Unknown product with doorbell: auto — whatever the client registers. */
 const AUTO_CHAIN: DoorbellKind[] = ["claude-socket", "codex-hook", "poll"];
 
@@ -57,10 +52,11 @@ export class Doorbells {
   }
 
   /** The agent's ordered chain: configured list or single kind, else its product's default. */
-  chain(agent: string): DoorbellKind[] {
+  chain(agent: string): readonly DoorbellKind[] {
     const conf = this.cfg.agents[agent]?.doorbell ?? "auto";
-    const list: DoorbellKind[] =
-      conf === "auto" ? (PRODUCT_DOORBELLS[this.cfg.agents[agent]?.product ?? ""] ?? AUTO_CHAIN) : Array.isArray(conf) ? conf : [conf];
+    const product = this.cfg.agents[agent]?.product;
+    const defaults = products.find((p) => product && p.ids.includes(product))?.doorbells ?? AUTO_CHAIN;
+    const list = conf === "auto" ? defaults : Array.isArray(conf) ? conf : [conf];
     return list.includes("poll") ? list : [...list, "poll"];
   }
 

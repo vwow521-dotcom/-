@@ -44,7 +44,7 @@ const ConfigSchema = z
         .object({
           product: z.string().optional(),
           // How the postman wakes this agent: an ordered list tried in turn (poll always last), a single
-          // kind, or auto = the product's default chain (src/doorbells/index.ts PRODUCT_DOORBELLS); for an
+          // kind, or auto = the product's default chain (src/products/); for an
           // unknown product, whatever the client registers.
           doorbell: z.union([z.literal("auto"), z.enum(DOORBELL_KINDS), z.array(z.enum(DOORBELL_KINDS)).min(1)]).default("auto"),
         })

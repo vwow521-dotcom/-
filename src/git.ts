@@ -1,9 +1,11 @@
 // Thin wrapper over the git CLI in the target project.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+
+const MAX_BUFFER = 32 * 1024 * 1024;
 
 function git(cwd: string, args: string[]): Promise<{ ok: boolean; out: string }> {
   return new Promise((resolve) => {
-    execFile("git", ["-C", cwd, ...args], { maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) =>
+    execFile("git", ["-C", cwd, ...args], { maxBuffer: MAX_BUFFER, windowsHide: true }, (err, stdout, stderr) =>
       // trimEnd only: `git status --porcelain` lines start with a significant space.
       resolve({ ok: !err, out: (err ? stderr || err.message : stdout).toString().trimEnd() }),
     );
@@ -20,12 +22,29 @@ export async function dirtyFiles(cwd: string): Promise<string[]> {
   return r.ok && r.out ? r.out.split("\n") : [];
 }
 
+// Scope the old and new paths of a rename independently. NULs preserve literal filenames.
+const changedFileArgs = ["status", "--porcelain=v1", "-z", "--no-renames", "-uall"];
+const parseChangedFiles = (out: string) => out.split("\0").filter(Boolean).map((entry) => entry.slice(3));
+
 /** Paths (forward slashes, relative to the repo root) with uncommitted changes, including untracked files. */
 export async function changedFiles(cwd: string): Promise<string[]> {
-  // Scope the old and new paths of a rename independently. NULs preserve literal filenames.
-  const r = await git(cwd, ["status", "--porcelain=v1", "-z", "--no-renames", "-uall"]);
-  if (!r.ok || !r.out) return [];
-  return r.out.split("\0").filter(Boolean).map((entry) => entry.slice(3));
+  const r = await git(cwd, changedFileArgs);
+  return r.ok ? parseChangedFiles(r.out) : [];
+}
+
+/** Capture the task's baseline before publishing a new assignment. */
+export function snapshotChangedFiles(cwd: string): string[] {
+  try {
+    const out = execFileSync("git", ["--no-optional-locks", "-C", cwd, ...changedFileArgs], {
+      encoding: "utf8",
+      maxBuffer: MAX_BUFFER,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return parseChangedFiles(out);
+  } catch {
+    return [];
+  }
 }
 
 /** Minimal glob: `**` any depth, `*` within a segment, `?` one char. */

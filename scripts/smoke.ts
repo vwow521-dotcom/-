@@ -12,6 +12,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -78,9 +79,9 @@ async function stopDaemon() {
   await exited;
 }
 
-async function connect(name: string) {
+async function connect(name: string, transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"))) {
   const c = new Client({ name: `smoke-${name}`, version: "0.0.1" });
-  await c.connect(new StreamableHTTPClientTransport(new URL(BASE + "/mcp")));
+  await c.connect(transport);
   return c;
 }
 async function call(c: Client, name: string, args: Record<string, unknown>) {
@@ -123,6 +124,11 @@ try {
   const imposter = await connect("imposter");
   const j = await call(claude, "join", { agent_id: "claude" });
   check(j.roles?.length === 2 && j.doorbell === "poll", "claude joined, no doorbell → poll");
+  check(
+    j.protocol?.[0].includes("ToolSearch") &&
+      ["submit_handoff", "submit_meeting_turn", "fetch_inbox", "ack", "report_progress"].every((tool) => j.protocol[0].includes(tool)),
+    "join tells delayed-loading clients to load all five tools before fetching mail",
+  );
   check(!(await call(codex, "join", { agent_id: "codex" })).error, "codex joined");
   check((await call(imposter, "join", { agent_id: "claude" })).error, "duplicate identity rejected");
   check((await call(claude, "fetch_inbox", { agent_id: "claude" })).mails.length === 0, "empty inbox");
@@ -218,10 +224,18 @@ try {
   await startDaemon();
   s = await state();
   check(s.recentRuns.length === 2 && s.run.goal === "第二个任务", "runs persisted across restart");
-  claude = await connect("claude-again");
+  const claudeTransport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"));
+  claude = await connect("claude-again", claudeTransport);
   await call(claude, "join", { agent_id: "claude" });
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(t?.resumed === true && t.stage.id === "plan", "in-progress stage re-sent as mail after restart + rejoin");
+  await claudeTransport.terminateSession();
+  await claude.close();
+  claude = await connect("claude-new-session");
+  const recovered = await call(claude, "fetch_inbox", { agent_id: "claude" });
+  check(recovered.identity_recovered === true && recovered.identity_note.includes("恢复 claude") && task(recovered)?.resumed, "first tool call rebinds a closed session and resumes its live task");
+  const recoveredAgain = await call(claude, "get_context", { agent_id: "claude" });
+  check(recoveredAgain.current_round?.stage === "plan" && !recoveredAgain.identity_recovered, "recovery is reported only once");
 
   // Identity: a blocked join explains how to proceed; the panel can release; the agent can leave.
   const intruder = await connect("intruder");
@@ -230,7 +244,9 @@ try {
   check((await api("/api/agents/claude/release", {})).status === 200, "panel releases the identity");
   check((await call(claude, "fetch_inbox", { agent_id: "claude" })).error, "released session can no longer act");
   check(!(await call(intruder, "join", { agent_id: "claude" })).error, "new session joins without takeover after release");
-  check(!(await call(intruder, "leave", { agent_id: "claude" })).error && !(await call(claude, "join", { agent_id: "claude" })).error, "leave frees it for the next session");
+  check(!(await call(intruder, "leave", { agent_id: "claude" })).error, "leave frees the identity");
+  check((await call(claude, "get_context", { agent_id: "claude" })).error, "a deliberate leave requires the next session to join");
+  await call(claude, "join", { agent_id: "claude" });
   await api("/api/runs/stop", {});
 
   // ===== D: meeting → task DAG, file leases, scoped commits =====
@@ -244,11 +260,13 @@ try {
   check((await api("/api/runs", { goal: "x" })).status === 409, "pipeline run refused while a meeting is open");
   let mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(mm?.kind === "proposal" && mm.round === 1 && mm.meeting_id === mid, "claude invited to round 1 (proposal)");
-  await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "方案 A：按目录拆" });
+  const proposalA = "## 方案 A\n按目录拆。每个模块归给一个人。";
+  const proposalB = "方案 B：按功能拆" + "，补充详细说明".repeat(40);
+  await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: proposalA });
   check((await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "again" })).error, "second turn in the same round rejected");
   check((await state()).meeting.status === "collecting", "meeting waits for codex");
   mm = meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" }));
-  await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: "方案 B：按功能拆", tasks: [{ id: "T1", title: "草案", owner: "codex" }] });
+  await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: proposalB, tasks: [{ id: "T1", title: "草案", owner: "codex" }] });
   s = await state();
   check(s.meeting.status === "review" && s.meeting.turns.length === 2, "all proposals in → waits for the human");
   await api(`/api/meetings/${mid}/next`, { action: "critique", note: "重点看能不能并行" });
@@ -257,6 +275,10 @@ try {
     mm?.kind === "critique" && mm.round === 2 && mm.previous_rounds[0].turns.length === 2 && mm.human_note === "重点看能不能并行",
     "critique round carries every proposal and the human's note",
   );
+  const proposals = mm?.previous_rounds[0].turns;
+  check(proposals?.find((turn: any) => turn.agent === "claude")?.content === proposalA &&
+    proposals?.find((turn: any) => turn.agent === "codex")?.content === proposalB &&
+    proposals?.find((turn: any) => turn.agent === "codex")?.tasks[0].title === "草案", "the immediately preceding round keeps full text and task drafts");
   await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "同意 B" });
   await call(codex, "fetch_inbox", { agent_id: "codex" });
   await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: "同意" });
@@ -264,6 +286,12 @@ try {
   check(!meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" })), "final round goes to the facilitator only");
   mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(mm?.kind === "final", "facilitator gets the final round");
+  const earlier = mm?.previous_rounds.find((round: any) => round.round === 1)?.turns;
+  check(earlier?.length === 2 && earlier.every((t: any) => t.summary && !("content" in t) && !("tasks" in t) && !("decisions" in t)) &&
+    earlier.find((t: any) => t.agent === "claude")?.summary === "按目录拆。" &&
+    earlier.find((t: any) => t.agent === "codex")?.summary.length === 160 &&
+    mm.previous_rounds.find((round: any) => round.round === 2)?.turns.some((t: any) => t.content === "同意 B"),
+    "final mail summarizes each older speaker and carries the previous critique in full");
   const cyc = await call(claude, "submit_meeting_turn", {
     agent_id: "claude", meeting_id: mid, content: "x",
     tasks: [{ id: "T1", title: "a", owner: "claude", depends_on: ["T2"] }, { id: "T2", title: "b", owner: "nobody", depends_on: ["T1"] }],
@@ -277,6 +305,9 @@ try {
   ];
   await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "最终方案：四个任务", decisions: [{ what: "按目录拆", why: "互不干扰" }], tasks: plan });
   check((await state()).meeting.status === "awaiting_approval", "final plan waits for approval");
+  write("IMPORTANT.md", "用户的反馈\n");
+  sh("add", "--", "IMPORTANT.md");
+  write("开工前新增.txt", "用户保留的未暂存文件\n");
   const appr = await api(`/api/meetings/${mid}/decide`, { action: "approve", note: "注意中文注释" });
   check(appr.status === 200 && /^doc\/meetings\/\d{4}-\d{2}-\d{2}-拆成并行任务\.md$/.test(appr.json.doc_path), `approved → minutes at ${appr.json.doc_path}`);
   const minutes = fs.readFileSync(path.join(proj, appr.json.doc_path), "utf8");
@@ -292,6 +323,11 @@ try {
   let ci = await call(codex, "fetch_inbox", { agent_id: "codex" });
   const codexTasks = ci.mails.filter((m: any) => m.kind === "task" && !m.void);
   check(codexTasks.length === 1 && codexTasks[0].task.task.key === "T2", "codex gets only one task at a time (T2, T4 held back)");
+  const busyDoorbell = fetch(BASE + "/api/doorbell/wait?agent=codex&kind=codex-hook&timeout=10").then((r) => r.json());
+  for (let i = 0; i < 30 && !(await state()).agents.find((a: any) => a.id === "codex").doorbellArmed; i++) await sleep(100);
+  const queuedDuringT2 = await api("/api/mail", { to: "codex", text: "结束 T2 后再看" });
+  check((await busyDoorbell).mailIds?.includes(queuedDuringT2.json.id), "a ring was delivered while codex was working on T2");
+  const rungAtBusy = Date.now();
 
   const rc = await call(codex, "reserve_paths", { agent_id: "codex", globs: ["a/one.txt"], reason: "想顺手改" });
   check(rc.granted === false && rc.conflicts[0].held_by === "claude" && rc.conflicts[0].task === "T1", "lease conflict reports the holder");
@@ -299,6 +335,18 @@ try {
   check(conflictMail?.subject.includes("文件冲突"), "holder is told about the conflict");
   const rs = await call(codex, "reserve_paths", { agent_id: "codex", globs: ["shared/notes.md"], ttl_seconds: 60 });
   check(rs.granted === true, "free path reserved");
+  const contextWithLease = await call(codex, "get_context", { agent_id: "codex" });
+  check(
+    contextWithLease.current_task?.key === "T2" &&
+      contextWithLease.meeting?.minutes === appr.json.doc_path &&
+      contextWithLease.leases.some((l: any) => l.glob === "shared/notes.md" && l.task === "T2"),
+    "context combines the scheduled task, meeting minutes and its live file leases",
+  );
+  const releasedPath = await call(codex, "release_paths", { agent_id: "codex", globs: ["shared/notes.md"] });
+  check(
+    releasedPath.released?.includes("shared/notes.md") && !(await state()).leases.some((l: any) => l.glob === "shared/notes.md"),
+    "releasing a temporary lease updates the panel state",
+  );
 
   fs.mkdirSync(path.join(proj, "a"), { recursive: true });
   fs.mkdirSync(path.join(proj, "b"), { recursive: true });
@@ -306,16 +354,32 @@ try {
   write("a/one.txt", "a (half done by claude)\n");
   write("b/one.txt", "b\n");
   write("stray.txt", "nobody's\n");
+  await sleep(Math.max(0, 17_500 - (Date.now() - rungAtBusy))); // cross the 12 s retry threshold and the next 5 s sweep
+  s = await state();
+  const busyMember = s.agents.find((a: any) => a.id === "codex");
+  const busyRing = s.mail.find((m: any) => m.id === queuedDuringT2.json.id);
+  check(busyMember.waitingForTurn === 1 && busyMember.unansweredMail === 0 && busyMember.stuckMail === 0 &&
+    s.attention?.agent !== "codex" && busyRing?.waitingForTurn && busyRing.status === "rung" && busyRing.ring_count === 1,
+    "busy ring stays queued through the sweep, with neither retries nor a wake alert");
+  check((await (await fetch(BASE + "/")).text()).includes("排队中，等对方这一轮结束"), "panel includes the busy queue label");
   sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "b 完成", files_changed: ["b/one.txt"] });
   const t2files = sh("show", "--name-only", "--format=", sub.commit).split("\n").filter(Boolean);
   check(t2files.length === 1 && t2files[0] === "b/one.txt", `parallel commit holds only the task's files (${t2files.join(",")})`);
-  check(sub.scope_notes.some((n: string) => n.includes("stray.txt")) && !sub.scope_notes.some((n: string) => n.includes("a/one.txt")), "stray file noted, the other task's leased file silently left alone");
+  const preexistingNote = sub.scope_notes.find((n: string) => n.startsWith("开工前就有的未提交改动"));
+  const parallelNote = sub.scope_notes.find((n: string) => n.startsWith("其他任务进行中的改动"));
+  check(preexistingNote?.includes("IMPORTANT.md") && preexistingNote.includes("开工前新增.txt") && !preexistingNote.includes("a/one.txt"), "scope notes separate the staged and untracked changes present at task start");
+  check(parallelNote?.includes("a/one.txt（claude/T1）") && !parallelNote.includes("IMPORTANT.md"), "scope notes identify the other active task by its lease");
+  check(sub.scope_notes.some((n: string) => n.includes("stray.txt") && n.startsWith("改动不在本任务范围")), "an unleased new file still gets a generic scope note");
   check(sh("status", "--porcelain", "-uall").includes("a/one.txt"), "claude's in-flight file still uncommitted");
   fs.rmSync(path.join(proj, "stray.txt"));
   s = await state();
   check(tk("T2").status === "done" && tk("T3").status === "pending" && tk("T3").waiting === "等 T1", "T2 done (no reviewer), T3 still waits for T1");
 
-  t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
+  check(!(s.mail.find((m: any) => m.id === queuedDuringT2.json.id)?.waitingForTurn), "queue label clears when the active task stage ends");
+  const afterBusy = await call(codex, "fetch_inbox", { agent_id: "codex" });
+  check(afterBusy.mails.some((m: any) => m.id === queuedDuringT2.json.id), "codex can fetch the waiting mail after handing off T2");
+  await call(codex, "ack", { agent_id: "codex", mail_ids: [queuedDuringT2.json.id] });
+  t = task(afterBusy);
   check(t?.task?.key === "T4", "codex free → T4 delivered");
   write("a/one.txt", "a\n");
   sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "a 完成", files_changed: ["a/one.txt"] });
@@ -327,8 +391,6 @@ try {
   await call(codex, "submit_handoff", { agent_id: "codex", summary: "d 完成", files_changed: ["d/one.txt"] });
   t = task(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   check(t?.task?.key === "T1" && t.stage.id === "review" && t.input_handoff?.summary === "a 完成", "codex then gets the T1 review");
-  write("IMPORTANT.md", "用户的反馈\n");
-  sh("add", "--", "IMPORTANT.md");
   write("a/one.txt", "a (local change left in the review scope)\n");
   sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "a 没问题", verdict: "approve", files_changed: [] });
   check(/^[0-9a-f]{40}$/.test(sub.commit) && sh("diff-tree", "-r", "--no-commit-id", "--name-only", sub.commit) === "", "last active task's review commits an empty tree diff");
@@ -341,9 +403,32 @@ try {
   check(!s.leases.some((l: any) => l.task === "T1" || l.task === "T2"), "finished tasks' leases released");
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(t?.task?.key === "T3" && t.dependencies.length === 2 && t.dependencies.every((d: any) => d.status === "done" && d.commit), "T3 sees its dependencies' results");
+
+  // A replayed task letter reads the current dependency state, even when a dependency is unfinished.
+  // This fixture changes only the temporary DB, since normal scheduling waits for T1 before dispatching T3.
+  const dependencyDb = new DatabaseSync(path.join(proj, ".bridge", "bridge.db"));
+  dependencyDb.exec("PRAGMA busy_timeout = 1000");
+  const taskStatus = dependencyDb.prepare("UPDATE tasks SET status = ? WHERE id = ?");
+  const attemptStatus = dependencyDb.prepare("UPDATE attempts SET status = ? WHERE id = ?");
+  const upstreamId = tk("T1").id;
+  try {
+    taskStatus.run("active", upstreamId);
+    attemptStatus.run("awaiting_approval", gate.id);
+    await call(claude, "join", { agent_id: "claude" });
+    const resumedTask = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
+    const dependency = resumedTask?.dependencies.find((d: any) => d.key === "T1");
+    check(resumedTask?.resumed && dependency?.status === "active" && dependency.stage === "review" &&
+      dependency.stage_status === "awaiting_approval" && dependency.last_handoff_stage === "review" && dependency.commit === sub.commit,
+      "replayed task mail includes the unfinished dependency's current stage and latest handoff commit");
+  } finally {
+    attemptStatus.run("approved", gate.id);
+    taskStatus.run("done", upstreamId);
+    dependencyDb.close();
+  }
   write("c.txt", "c\n");
   sub = await call(claude, "submit_handoff", { agent_id: "claude", summary: "合并完成" });
   check(/^[0-9a-f]{40}$/.test(sub.commit) && sh("diff-tree", "-r", "--no-commit-id", "--name-only", sub.commit) === "c.txt", "last active implementation commits only its task paths");
+  check(sub.scope_notes.some((n: string) => n.startsWith("开工前就有的未提交改动") && n.includes("a/one.txt")), "a dependent task gets a fresh baseline when its dependencies finish");
   check(sh("diff", "--cached", "--name-only") === "IMPORTANT.md" && sh("diff", "--name-only") === "a/one.txt", "scoped implementation leaves unrelated staged and unstaged changes intact");
   s = await state();
   check(s.run.status === "done" && s.tasks.every((x: any) => x.status === "done"), "all tasks done → run done");
@@ -365,14 +450,17 @@ try {
     });
   });
   await new Promise<void>((r) => pipe.listen(pipePath, r));
-  const proxy = new Client({ name: "fake-claude", version: "0" });
-  await proxy.connect(
-    new StdioClientTransport({
+  async function connectClaudeProxy(socket = pipePath) {
+    const proxy = new Client({ name: "fake-claude", version: "0" });
+    const transport = new StdioClientTransport({
       command: process.execPath,
       args: [path.join(ROOT, "bin/bridge-mcp.mjs")],
-      env: { ...(process.env as Record<string, string>), BRIDGE_URL: BASE, CLAUDE_CODE_MESSAGING_SOCKET: pipePath, CLAUDE_CODE_MESSAGING_TOKEN: "tok-123" },
-    }),
-  );
+      env: { ...(process.env as Record<string, string>), BRIDGE_URL: BASE, CLAUDE_CODE_MESSAGING_SOCKET: socket, CLAUDE_CODE_MESSAGING_TOKEN: "tok-123" },
+    });
+    await proxy.connect(transport);
+    return { proxy, transport };
+  }
+  let { proxy, transport: claudeProxyTransport } = await connectClaudeProxy();
   const tools = await proxy.listTools();
   check(tools.tools.some((x) => x.name === "fetch_inbox"), "proxy lists daemon tools");
   const pj = await call(proxy as Client, "join", { agent_id: "pbot" });
@@ -387,9 +475,61 @@ try {
   check((await state()).mail.find((m: any) => m.to === "pbot").status === "rung", "mail marked rung");
   const pi = await call(proxy as Client, "fetch_inbox", { agent_id: "pbot" });
   check(pi.mails[0]?.body.includes("该干活了"), "agent fetches the mail through the proxy");
+  const firstBinding = (await state()).agents.find((a: any) => a.id === "pbot").binding?.session;
+  const alias = await connectClaudeProxy(pipePath + "-other");
+  check((await call(alias.proxy, "fetch_inbox", { agent_id: "pbot" })).error &&
+    (await state()).agents.find((a: any) => a.id === "pbot").binding?.session === firstBinding, "another socket neither loads this join cache nor takes over its binding");
+  await alias.proxy.close();
+  await proxy.close();
+  check(!(await state()).agents.find((a: any) => a.id === "pbot").binding, "closing proxy stdin deletes its MCP session and releases its identity");
+
+  async function waitForProxyBinding() {
+    for (let i = 0; i < 60; i++) {
+      const agent = (await state()).agents.find((a: any) => a.id === "pbot");
+      if (agent.binding && agent.doorbellArmed) return agent.binding.session as string;
+      await sleep(100);
+    }
+    return null;
+  }
+  async function checkProxyDelivery(client: Client, message: string) {
+    const before = frames.length;
+    const sent = await api("/api/mail", { to: "pbot", text: message });
+    for (let i = 0; i < 40 && frames.length < before + 2; i++) await sleep(100);
+    const inbox = await call(client, "fetch_inbox", { agent_id: "pbot" });
+    check(
+      frames[before + 1]?.message.content.includes(message) && inbox.mails?.some((m: any) => m.id === sent.json.id),
+      "restored proxy rings and fetches: " + message,
+    );
+  }
+  ({ proxy, transport: claudeProxyTransport } = await connectClaudeProxy());
+  const beforeCrash = await waitForProxyBinding();
+  check(beforeCrash, "restarted Claude proxy replays join and arms before its first tool call");
+  await checkProxyDelivery(proxy, "正常重启后的首封信");
+  const closed = new Promise<void>((resolve) => { proxy.onclose = resolve; });
+  process.kill(claudeProxyTransport.pid!, "SIGKILL");
+  await closed;
+  check((await state()).agents.find((a: any) => a.id === "pbot").binding?.session === beforeCrash, "killed proxy leaves the old HTTP binding behind");
+  ({ proxy } = await connectClaudeProxy());
+  for (let i = 0; i < 60 && (await state()).agents.find((a: any) => a.id === "pbot").binding?.session === beforeCrash; i++) await sleep(100);
+  const afterCrash = await waitForProxyBinding();
+  check(afterCrash && afterCrash !== beforeCrash, "same Claude socket takes over the orphaned binding");
+  await checkProxyDelivery(proxy, "强制结束转接后的首封信");
+  await stopDaemon();
+  await startDaemon();
+  check(await waitForProxyBinding(), "idle proxy restores its binding and doorbell after daemon restart");
+  await checkProxyDelivery(proxy, "守护进程重启后的首封信");
+
+  await api("/api/agents/pbot/release", {});
+  await proxy.close();
+  ({ proxy } = await connectClaudeProxy());
+  check((await call(proxy, "fetch_inbox", { agent_id: "pbot" })).error && !(await state()).agents.find((a: any) => a.id === "pbot").binding, "panel release revokes the cached replay");
+  await call(proxy, "join", { agent_id: "pbot" });
+  check((await call(proxy, "leave", { agent_id: "pbot" })).ok, "Claude proxy leaves deliberately");
+  await proxy.close();
+  ({ proxy } = await connectClaudeProxy());
+  check((await call(proxy, "fetch_inbox", { agent_id: "pbot" })).error, "leave removes the Claude proxy's restore state");
   await proxy.close();
   pipe.close();
-  check(!(await state()).agents.find((a: any) => a.id === "pbot").binding, "closing proxy stdin deletes its MCP session and releases its identity");
 
   // Codex uses the same stdio proxy without the Claude socket. A fresh proxy must join without takeover.
   const proxyEnv = { ...process.env, BRIDGE_URL: BASE } as Record<string, string>;
@@ -526,7 +666,6 @@ try {
   await call(qbot, "fetch_inbox", { agent_id: "qbot" });
 
   // Codex already has a wake message queued for this thread → don't stack another.
-  const { DatabaseSync } = await import("node:sqlite");
   const qdb = new DatabaseSync(path.join(codexHome, "queue_1.sqlite"));
   qdb.exec("CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL, queue_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)");
   qdb.prepare("INSERT INTO queued_items VALUES ('x', 'thread-q1', '{}', 1, 0, 0)").run();

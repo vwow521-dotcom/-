@@ -232,6 +232,7 @@ function render(s) {
     h += '<div class="card" style="border-color:var(--acc)"><h2>' + esc(q.agent) + " 问你</h2><div>" + esc(q.question) +
       '</div><div class="row" style="margin-top:8px"><input id="ans-' + q.id + '" data-keep class="grow" placeholder="你的回答"><button class="primary" onclick="answer(' + q.id + ')">回答</button></div></div>';
 
+  const waitingForTurn = "排队中，等对方这一轮结束";
   h += '<div class="card"><h2>成员</h2><table><tr><th>agent</th><th>负责</th><th>状态</th><th>门铃</th><th>信件</th><th>上次活动</th><th>发消息</th></tr>' +
     s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) +
       (a.binding ? '<br><small class="mute" title="绑定的会话 ' + esc(a.binding.session) + '">绑定于 ' + t(a.binding.since) +
@@ -243,6 +244,7 @@ function render(s) {
       (a.doorbellError ? '<br><span class="err">' + esc(a.doorbellError) + "</span>" : "") + "</small></td><td><small>" +
       (a.pendingMail ? "未取 " + a.pendingMail : "") + (a.stuckMail ? ' <span class="err">送不到 ' + a.stuckMail + "</span>" : "") + (a.unansweredMail ? ' <span class="err">叫不醒 ' + a.unansweredMail + "</span>" : "") +
       (a.unackedMail ? " 待确认 " + a.unackedMail : "") + (!a.pendingMail && !a.unackedMail ? "—" : "") +
+      (a.waitingForTurn ? '<br><span class="s-waiting">' + waitingForTurn + (a.waitingForTurn > 1 ? " ×" + a.waitingForTurn : "") + "</span>" : "") +
       '</small></td><td><span data-ago="' + esc(a.lastSeenAt || "") + '">—</span></td>' +
       '<td><div class="row" style="flex-wrap:nowrap"><input id="msg-' + esc(a.id) + '" data-keep placeholder="给 ' + esc(a.id) + ' 发消息" style="min-width:140px">' +
       '<button onclick="sendMsg(\\'' + esc(a.id) + '\\')">发送</button></div></td></tr>').join("") + "</table></div>";
@@ -251,7 +253,7 @@ function render(s) {
   if (s.mail.length)
     h += '<div class="card"><h2>信件</h2><div class="feed">' + s.mail.map((m) =>
       "<div><small>" + t(m.created_at) + "</small> " + esc(m.from) + " → " + esc(m.to) + "：" + esc(m.subject) +
-      ' <span class="chip m-' + m.status + '">' + (mailStatus[m.status] || m.status) + (m.ring_count > 1 ? " ×" + m.ring_count : "") + "</span>" +
+      ' <span class="chip m-' + m.status + '">' + (m.waitingForTurn ? waitingForTurn : mailStatus[m.status] || m.status) + (m.ring_count > 1 ? " ×" + m.ring_count : "") + "</span>" +
       (m.overdue ? ' <span class="err">确认超时</span>' : "") + "</div>").join("") + "</div></div>";
 
   h += '<div class="cols"><div class="card"><h2>交接记录</h2>' +

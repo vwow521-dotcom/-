@@ -35,13 +35,13 @@ try {
 }
 const store = new Store(projectDir);
 const engine = new Engine(cfg, store);
-engine.notifyHuman = (title, body) => {
+engine.context.notifyHuman = (title, body) => {
   if (cfg.notify.enabled) toast(title, body, `http://127.0.0.1:${PORT}/`);
 };
 
 // ---------- MCP endpoint ----------
 const transports = new Map<string, StreamableHTTPServerTransport>();
-engine.isSessionOpen = (id) => transports.has(id);
+engine.presence.isSessionOpen = (id) => transports.has(id);
 
 const app = express();
 app.use(express.json({ limit: "4mb" }));
@@ -58,14 +58,14 @@ app.post("/mcp", async (req, res) => {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         transports.set(id, t);
-        engine.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo });
+        engine.context.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo });
       },
     });
     t.onclose = () => {
       if (!t.sessionId) return;
       transports.delete(t.sessionId);
-      engine.log("mcp_session_close", { session: t.sessionId });
-      engine.sessionClosed(t.sessionId);
+      engine.context.log("mcp_session_close", { session: t.sessionId });
+      engine.presence.sessionClosed(t.sessionId);
     };
     await buildServer(engine).connect(t);
     transport = t;
@@ -87,7 +87,7 @@ app.delete("/mcp", sessionRequest);
 // ---------- panel + JSON API ----------
 const sseClients = new Set<express.Response>();
 let changeTimer: NodeJS.Timeout | null = null;
-engine.onChange = () => {
+engine.context.onChange = () => {
   if (changeTimer) return; // coalesce bursts
   changeTimer = setTimeout(() => {
     changeTimer = null;
@@ -100,7 +100,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/api/state", async (_req, res) => {
-  res.json({ ...engine.snapshot(), git: { repo: await isRepo(projectDir), dirty: (await dirtyFiles(projectDir)).length } });
+  res.json({ ...engine.workspace.snapshot(), git: { repo: await isRepo(projectDir), dirty: (await dirtyFiles(projectDir)).length } });
 });
 
 app.get("/api/stream", (req, res) => {
@@ -119,72 +119,78 @@ const reply = (res: express.Response, r: Record<string, unknown>) => res.status(
 app.post("/api/runs", (req, res) => {
   const goal = String(req.body?.goal ?? "").trim();
   if (!goal) return void res.status(400).json({ error: "目标不能为空" });
-  reply(res, engine.startRun(goal));
+  reply(res, engine.scheduler.startRun(goal));
 });
-app.post("/api/runs/stop", (_req, res) => reply(res, engine.stopRun()));
+app.post("/api/runs/stop", (_req, res) => reply(res, engine.scheduler.stopRun()));
 app.post("/api/attempts/:id/decide", (req, res) => {
   const action = req.body?.action;
   if (action !== "approve" && action !== "reject") return void res.status(400).json({ error: "action 必须是 approve 或 reject" });
-  reply(res, engine.decide(Number(req.params.id), action, String(req.body?.note ?? "")));
+  reply(res, engine.scheduler.decide(Number(req.params.id), action, String(req.body?.note ?? "")));
 });
 app.post("/api/meetings", (req, res) => {
   const topic = String(req.body?.topic ?? "").trim();
   if (!topic) return void res.status(400).json({ error: "议题不能为空" });
   const parts = Array.isArray(req.body?.participants) ? req.body.participants.map(String) : undefined;
-  reply(res, engine.startMeeting(topic, parts, req.body?.facilitator ? String(req.body.facilitator) : undefined));
+  reply(res, engine.meetings.startMeeting(topic, parts, req.body?.facilitator ? String(req.body.facilitator) : undefined));
 });
 app.post("/api/meetings/:id/next", (req, res) => {
   const action = req.body?.action;
   if (action !== "critique" && action !== "finalize") return void res.status(400).json({ error: "action 必须是 critique 或 finalize" });
-  reply(res, engine.meetingNext(Number(req.params.id), action, String(req.body?.note ?? "")));
+  reply(res, engine.meetings.meetingNext(Number(req.params.id), action, String(req.body?.note ?? "")));
 });
 app.post("/api/meetings/:id/decide", async (req, res) => {
   const action = req.body?.action;
   if (action !== "approve" && action !== "reject") return void res.status(400).json({ error: "action 必须是 approve 或 reject" });
-  reply(res, await engine.meetingDecide(Number(req.params.id), action, String(req.body?.note ?? "")));
+  reply(res, await engine.meetings.meetingDecide(Number(req.params.id), action, String(req.body?.note ?? "")));
 });
-app.post("/api/meetings/:id/cancel", (req, res) => reply(res, engine.meetingCancel(Number(req.params.id))));
+app.post("/api/meetings/:id/cancel", (req, res) => reply(res, engine.meetings.meetingCancel(Number(req.params.id))));
 app.post("/api/questions/:id/answer", (req, res) => {
   const answer = String(req.body?.answer ?? "").trim();
   if (!answer) return void res.status(400).json({ error: "回答不能为空" });
-  reply(res, engine.answer(Number(req.params.id), answer));
+  reply(res, engine.workspace.answer(Number(req.params.id), answer));
 });
-app.post("/api/agents/:id/release", (req, res) => reply(res, engine.release(req.params.id, "human")));
+app.post("/api/agents/:id/release", (req, res) => reply(res, engine.presence.release(req.params.id, "human")));
 
 app.post("/api/mail", (req, res) => {
   const to = String(req.body?.to ?? "");
   const t = String(req.body?.text ?? "").trim();
   if (!t) return void res.status(400).json({ error: "消息不能为空" });
-  reply(res, engine.sendFromHuman(to, t));
+  reply(res, engine.postman.sendFromHuman(to, t));
 });
 
 // Parked doorbells: the stdio proxy (claude-socket) and a parking Codex Stop hook (codex-hook) long-poll here.
 app.get("/api/doorbell/wait", async (req, res) => {
   const agent = String(req.query.agent ?? "");
   const kind = String(req.query.kind ?? "");
-  if (!engine.isAgent(agent) || !["claude-socket", "codex-hook"].includes(kind))
+  if (!engine.presence.isAgent(agent) || !["claude-socket", "codex-hook"].includes(kind))
     return void res.status(400).json({ error: "agent 或 kind 无效" });
+  // New Claude proxies tie their parked doorbell to the bound MCP session.
+  const session = kind === "claude-socket" ? req.get("mcp-session-id") : undefined;
+  const stillBound = () => !session || engine.presence.get(agent)?.sessionId === session;
+  const disconnected = () => res.status(409).json({ reconnect: !!session && !transports.has(session) });
+  if (!stillBound()) return void disconnected();
   const timeoutMs = Math.min(Math.max(Number(req.query.timeout ?? 50), 1), 55) * 1000;
   const ac = new AbortController();
   res.on("close", () => ac.abort());
-  const r = await engine.doorbellWait(agent, kind as "claude-socket" | "codex-hook", timeoutMs, ac.signal);
-  if (!res.writableEnded && !ac.signal.aborted) res.json(r);
-  else if (r.ring && r.mailIds) engine.doorbellResult(agent, r.mailIds, false, "门铃连接在送达前断开", kind as "claude-socket" | "codex-hook");
+  const r = await engine.postman.doorbellWait(agent, kind as "claude-socket" | "codex-hook", timeoutMs, ac.signal);
+  if (!res.writableEnded && !ac.signal.aborted && stillBound()) return void res.json(r);
+  if (!res.writableEnded && !ac.signal.aborted) disconnected();
+  if (r.ring && r.mailIds) engine.postman.doorbellResult(agent, r.mailIds, false, "门铃连接在送达前断开", kind as "claude-socket" | "codex-hook");
 });
 app.post("/api/doorbell/result", (req, res) => {
   const agent = String(req.body?.agent ?? "");
-  if (!engine.isAgent(agent)) return void res.status(400).json({ error: "agent 无效" });
-  engine.doorbellResult(agent, Array.isArray(req.body?.mailIds) ? req.body.mailIds.map(String) : [], !!req.body?.ok, req.body?.error);
+  if (!engine.presence.isAgent(agent)) return void res.status(400).json({ error: "agent 无效" });
+  engine.postman.doorbellResult(agent, Array.isArray(req.body?.mailIds) ? req.body.mailIds.map(String) : [], !!req.body?.ok, req.body?.error);
   res.json({ ok: true });
 });
 // Where an agent's client can be reached outside MCP. The Codex Stop hook registers its conversation id
 // (kind "codex-thread") at the end of every turn; the answer tells it whether to park as the doorbell.
 app.post("/api/agents/:id/endpoint", (req, res) => {
-  reply(res, engine.registerEndpoint(req.params.id, String(req.body?.kind ?? ""), String(req.body?.address ?? "")));
+  reply(res, engine.postman.registerEndpoint(req.params.id, String(req.body?.kind ?? ""), String(req.body?.address ?? "")));
 });
 // Pre-0.5 hooks.
 app.post("/api/codex/thread", (req, res) => {
-  reply(res, engine.registerEndpoint(String(req.body?.agent ?? ""), "codex-thread", String(req.body?.session_id ?? "")));
+  reply(res, engine.postman.registerEndpoint(String(req.body?.agent ?? ""), "codex-thread", String(req.body?.session_id ?? "")));
 });
 
 app.get("/api/commits/:sha", async (req, res) => {
@@ -192,7 +198,7 @@ app.get("/api/commits/:sha", async (req, res) => {
 });
 
 app.listen(PORT, "127.0.0.1", async () => {
-  engine.log("server_start", { port: PORT, project: projectDir, config: cfg.source, pollSeconds: cfg.wait.poll_seconds });
+  engine.context.log("server_start", { port: PORT, project: projectDir, config: cfg.source, pollSeconds: cfg.wait.poll_seconds });
   const repo = await isRepo(projectDir);
   console.log(`项目:  ${projectDir}${repo ? "" : "  （警告：不是 git 仓库，交接不会自动提交）"}`);
   console.log(`配置:  ${cfg.source}`);

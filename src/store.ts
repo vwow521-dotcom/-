@@ -253,10 +253,14 @@ export class Store {
       CREATE TABLE IF NOT EXISTS agent_endpoints (
         agent TEXT NOT NULL, kind TEXT NOT NULL, address TEXT NOT NULL, registered_at TEXT NOT NULL,
         PRIMARY KEY (agent, kind));
+      CREATE TABLE IF NOT EXISTS agent_resume_keys (
+        agent TEXT PRIMARY KEY, key TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, key TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
         owner TEXT NOT NULL, reviewer TEXT, depends_on TEXT NOT NULL, paths TEXT NOT NULL, stages TEXT NOT NULL,
         status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT);
+      CREATE TABLE IF NOT EXISTS task_baselines (
+        task_id INTEGER PRIMARY KEY, paths TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS leases (
         id INTEGER PRIMARY KEY, run_id INTEGER, task_id INTEGER, agent TEXT NOT NULL, glob TEXT NOT NULL,
         exclusive INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT, released_at TEXT);
@@ -366,6 +370,15 @@ export class Store {
     return this.all<AgentEndpoint>("SELECT * FROM agent_endpoints ORDER BY registered_at DESC");
   }
 
+  resumeKey(agent: string) {
+    return this.one<{ key: string }>("SELECT key FROM agent_resume_keys WHERE agent = ?", agent)?.key;
+  }
+
+  setResumeKey(agent: string, key?: string) {
+    if (key) this.exec("INSERT OR REPLACE INTO agent_resume_keys (agent, key) VALUES (?, ?)", agent, key);
+    else this.exec("DELETE FROM agent_resume_keys WHERE agent = ?", agent);
+  }
+
   // ---- runs
   createRun(goal: string, meeting_id: number | null = null): Run {
     const id = this.insert("INSERT INTO runs (goal, status, meeting_id, created_at) VALUES (?, 'active', ?, ?)", goal, meeting_id, now());
@@ -402,6 +415,13 @@ export class Store {
   }
   tasks(run_id: number): Task[] {
     return this.all<any>("SELECT * FROM tasks WHERE run_id = ? ORDER BY id", run_id).map((r) => this.parseTask(r));
+  }
+  recordTaskBaseline(taskId: number, paths: string[]) {
+    this.exec("INSERT OR REPLACE INTO task_baselines (task_id, paths) VALUES (?, ?)", taskId, JSON.stringify(paths));
+  }
+  taskBaseline(taskId: number): string[] {
+    const row = this.one<{ paths: string }>("SELECT paths FROM task_baselines WHERE task_id = ?", taskId);
+    return row ? JSON.parse(row.paths) : [];
   }
   setTaskStatus(id: number, status: TaskStatus) {
     const col = status === "active" ? "started_at" : status === "done" || status === "cancelled" ? "ended_at" : null;

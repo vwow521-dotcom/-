@@ -9,6 +9,7 @@
 //
 // Env: BRIDGE_URL (default http://127.0.0.1:7878). Logs: <tmp>/ai-bridge/proxy.log (never the token).
 import fs from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +25,7 @@ const TOKEN = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
 const LOG_DIR = path.join(os.tmpdir(), "ai-bridge");
 fs.mkdirSync(LOG_DIR, { recursive: true });
 const LOG = path.join(LOG_DIR, "proxy.log");
+const JOIN_FILE = SOCK && TOKEN ? path.join(LOG_DIR, `join-${createHash("sha256").update(SOCK).digest("hex")}.json`) : null;
 const log = (msg, data) => {
   try {
     fs.appendFileSync(LOG, `${new Date().toISOString()} [pid ${process.pid}] ${msg}${data ? " " + JSON.stringify(data) : ""}\n`);
@@ -37,27 +39,83 @@ log("proxy start", { base: BASE, socket: !!SOCK, token: !!TOKEN, entry: process.
 let client = null;
 let httpTransport = null;
 let connecting = null;
-let lastJoin = null; // replayed (with takeover) after the daemon restarts
+let lastJoin = readJoin();
 let closing = false;
+
+function readJoin() {
+  if (!JOIN_FILE) return null;
+  try {
+    const { base, args } = JSON.parse(fs.readFileSync(JOIN_FILE, "utf8"));
+    if (base === BASE && typeof args?.agent_id === "string" && typeof args?._recovery?.key === "string") return args;
+  } catch {}
+  return null;
+}
+
+function saveJoin(args) {
+  lastJoin = args;
+  if (!JOIN_FILE) return;
+  const tmp = `${JOIN_FILE}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({ base: BASE, args }), { mode: 0o600 });
+    fs.renameSync(tmp, JOIN_FILE);
+  } catch (e) {
+    log("join cache write failed", { code: e.code });
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+  }
+}
+
+function forgetJoin(removeCache) {
+  const old = lastJoin;
+  lastJoin = null;
+  armDoorbell(null);
+  if (removeCache && old && readJoin()?._recovery.key === old._recovery.key) {
+    try { fs.rmSync(JOIN_FILE, { force: true }); } catch {}
+  }
+}
+
+function toolReply(result) {
+  if (!result.isError) {
+    try { return JSON.parse(result.content?.[0]?.text ?? "{}"); } catch {}
+  }
+  return {};
+}
 
 async function getClient() {
   if (closing) throw new Error("stdio is closing");
-  if (client) return client;
   if (connecting) return connecting;
+  if (client) return client;
   connecting = (async () => {
     const c = new Client({ name: "bridge-stdio-proxy", version: "0.2.0" });
-    httpTransport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"));
-    await c.connect(httpTransport);
-    if (closing) throw new Error("stdio is closing");
-    c.onclose = () => {
-      if (client === c) client = null;
-    };
-    client = c;
-    if (lastJoin) {
-      const r = await c.callTool({ name: "join", arguments: lastJoin });
-      log("re-joined after reconnect", { agent: lastJoin.agent_id, isError: !!r.isError });
+    const transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"));
+    httpTransport = transport;
+    try {
+      await c.connect(transport);
+      if (closing) throw new Error("stdio is closing");
+      let doorbellAgent = null;
+      if (lastJoin) {
+        const args = lastJoin;
+        const r = await c.callTool(
+          { name: "join", arguments: { ...args, takeover: true, _recovery: { key: args._recovery.key, replay: true } } },
+          undefined,
+          { timeout: 10_000 },
+        );
+        const joined = toolReply(r);
+        const restored = joined.agent_id === args.agent_id && !joined.error;
+        log("join replay", { agent: args.agent_id, restored });
+        if (restored && joined.doorbell === "claude-socket") doorbellAgent = args.agent_id;
+        if (!restored) forgetJoin(true);
+      }
+      if (closing) throw new Error("stdio is closing");
+      c.onclose = () => {
+        if (client === c) client = null;
+      };
+      client = c;
+      armDoorbell(doorbellAgent);
+      return c;
+    } catch (e) {
+      if (!closing) await c.close().catch(() => {});
+      throw e;
     }
-    return c;
   })();
   try {
     return await connecting;
@@ -66,25 +124,38 @@ async function getClient() {
   }
 }
 
+async function dropClient(c) {
+  if (!c || client !== c) return;
+  client = null;
+  await c.close().catch(() => {});
+}
+
 async function upstream(fn) {
+  let c;
   try {
-    return await fn(await getClient());
+    c = await getClient();
+    return await fn(c);
   } catch (e) {
     if (closing) throw e;
     // Session lost (daemon restarted) or daemon down: drop the client and retry once.
     log("upstream error, reconnecting", { error: String(e?.message ?? e) });
-    try {
-      await client?.close();
-    } catch {}
-    client = null;
+    await dropClient(c);
     return await fn(await getClient());
   }
 }
 
 // ---------- doorbell ----------
-let doorbellAgent = null;
-let ringLoopRunning = false;
-const doorbellAbort = new AbortController();
+let doorbell = null;
+
+function armDoorbell(agent) {
+  if (agent && doorbell?.agent === agent) return;
+  doorbell?.controller.abort();
+  doorbell = null;
+  if (!agent || !SOCK || !TOKEN || closing) return;
+  const controller = new AbortController();
+  doorbell = { agent, controller };
+  void ringLoop(agent, controller.signal);
+}
 
 function inject(text) {
   return new Promise((resolve) => {
@@ -109,33 +180,45 @@ function inject(text) {
   });
 }
 
-async function ringLoop() {
-  if (ringLoopRunning) return;
-  ringLoopRunning = true;
-  log("doorbell armed", { agent: doorbellAgent });
-  while (doorbellAgent && !closing) {
-    const agent = doorbellAgent;
+async function ringLoop(agent, signal) {
+  log("doorbell armed", { agent });
+  while (!signal.aborted) {
     try {
-      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=claude-socket&timeout=50`, { signal: doorbellAbort.signal });
+      const previous = await getClient();
+      if (signal.aborted) break;
+      const session = httpTransport?.sessionId;
+      const headers = { "mcp-session-id": session };
+      const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=claude-socket&timeout=50`, { headers, signal });
+      if (r.status === 409) {
+        const { reconnect } = await r.json();
+        if (signal.aborted) break;
+        if (reconnect) {
+          await dropClient(previous);
+          await getClient();
+        } else if (client === previous) {
+          // A live session lost its identity, so it must wait for an explicit join.
+          forgetJoin(false);
+        }
+        continue;
+      }
       if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json();
-      if (!j.ring || closing) continue;
+      if (!j.ring || signal.aborted) continue;
       const res = await inject(j.text);
-      if (closing) break;
+      if (signal.aborted) break;
       log("doorbell rang", { agent, mails: j.mailIds, ok: res.ok, error: res.error });
       await fetch(`${BASE}/api/doorbell/result`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ agent, mailIds: j.mailIds, ok: res.ok, error: res.error }),
-        signal: doorbellAbort.signal,
+        signal,
       }).catch(() => {});
     } catch (e) {
-      if (closing) break;
+      if (signal.aborted) break;
       log("doorbell wait failed", { error: String(e?.message ?? e) });
       await sleep(3000);
     }
   }
-  ringLoopRunning = false;
 }
 
 // ---------- downstream (Claude, stdio) ----------
@@ -164,20 +247,19 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       content: [{ type: "text", text: `协作桥没有运行（${BASE}）。请让用户在 E:\\Interaction-ai 里运行：npm start -- --project <项目目录>，然后重新调用 join。` }],
       isError: true,
     };
-  if (name === "join" && SOCK && TOKEN) args = { ...args, _doorbell: "claude-socket" };
-  const result = await upstream((c) => c.callTool({ name, arguments: args }, undefined, { signal: extra.signal, timeout: 10 * 60_000 }));
-  if (name === "join" && !result.isError) {
-    try {
-      const parsed = JSON.parse(result.content?.[0]?.text ?? "{}");
-      if (!parsed.error && parsed.agent_id) {
-        lastJoin = { ...args, takeover: true };
-        if (SOCK && TOKEN && parsed.doorbell === "claude-socket") {
-          doorbellAgent = parsed.agent_id;
-          ringLoop();
-        }
-      }
-    } catch {}
+  if (name === "join") {
+    args = { ...args, _recovery: { key: randomUUID(), replay: false } };
+    if (SOCK && TOKEN) args._doorbell = "claude-socket";
   }
+  const result = await upstream((c) => c.callTool({ name, arguments: args }, undefined, { signal: extra.signal, timeout: 10 * 60_000 }));
+  if (name === "join" && !closing) {
+    const joined = toolReply(result);
+    if (!joined.error && joined.agent_id) {
+      saveJoin({ agent_id: joined.agent_id, takeover: args.takeover, _doorbell: args._doorbell, _recovery: args._recovery });
+      armDoorbell(joined.doorbell === "claude-socket" ? joined.agent_id : null);
+    }
+  }
+  if (name === "leave" && args.agent_id === lastJoin?.agent_id && toolReply(result).ok) forgetJoin(true);
   return result;
 });
 
@@ -201,7 +283,7 @@ async function waitForDaemonThenAnnounce() {
 async function shutdown() {
   if (closing) return;
   closing = true;
-  doorbellAbort.abort();
+  armDoorbell(null);
   // A stopped daemon must not keep the proxy alive after its parent has closed stdin.
   const deadline = setTimeout(() => {
     log("stdio closed, upstream cleanup timed out");
@@ -221,7 +303,6 @@ async function shutdown() {
     await server.close();
     clearTimeout(deadline);
     log("stdio closed, upstream cleanup finished");
-    process.exit(0); // don't let a leftover handle keep an orphaned proxy alive
   }
 }
 
@@ -232,3 +313,4 @@ process.stdin.once("end", shutdown);
 process.stdin.once("close", shutdown);
 await server.connect(transport);
 log("stdio connected");
+if (lastJoin) void getClient().catch(() => waitForDaemonThenAnnounce());
