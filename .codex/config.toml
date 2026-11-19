@@ -1,3 +1,0 @@
-[mcp_servers.bridge]
-command = "node"
-args = ["E:/Interaction-ai/bin/bridge-mcp.mjs"]

@@ -1,21 +1,34 @@
 {
   "name": "ai-bridge",
-  "version": "1.0.0",
-  "description": "Local MCP bridge for multi-product AI agent collaboration",
-  "directories": {
-    "doc": "docs"
+  "version": "0.3.0",
+  "description": "本地 AI 协作桥：让 Claude、Codex 等桌面端 AI 通过 MCP 信箱与门铃接力完成同一个项目",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "ai-bridge": "bin/ai-bridge.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "bridge.config.example.yaml",
+    "docs/USAGE.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.13"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "start": "tsx src/daemon.ts",
+    "dev": "tsx src/daemon.ts",
     "smoke": "tsx scripts/smoke.ts",
     "m0": "tsx src/m0/server.ts",
     "m0:smoke": "tsx scripts/m0-smoke.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "reinstall": "node scripts/reinstall.mjs",
+    "cli": "npm run build --silent && node bin/ai-bridge.mjs"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "express": "^5.3.0",
@@ -27,6 +40,5 @@
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
-  },
-  "private": true
+  }
 }

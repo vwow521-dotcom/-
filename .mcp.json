@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "bridge": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["E:/Interaction-ai/bin/bridge-mcp.mjs"]
-    }
-  }
-}

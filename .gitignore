@@ -1,2 +1,5 @@
 node_modules/
 .bridge/
+dist/
+release/
+*.tgz

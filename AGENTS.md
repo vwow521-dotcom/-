@@ -8,15 +8,20 @@ A local "AI collaboration bridge". One long-running Node daemon exposes an MCP s
 
 The design docs are in Chinese. `docs/ARCHITECTURE-v2.md` is the current architecture: the postman, the borrowed designs, and the S1/S2 spike results. `docs/DESIGN.md` covers the original goals and decisions. Read them before changing behaviour. The user communicates in Chinese, and the agent-facing tool text and the panel are in Chinese too. How to use the bridge: `docs/USAGE.md`.
 
-Stage: M2b (postman) is done. Next is M2c: a meeting engine, a task DAG, file leases, and per-task commits. After that comes M2d: the panel from the roundtable/board prototype. Treat `src/m0/` and `spikes/` as records. Don't extend them.
+Stage: M2b (postman) and M2b.1 are done, and the bridge ships as an installable package (0.3, `ai-bridge` CLI). Next is M2c: a meeting engine, a task DAG, file leases, and per-task commits. After that comes M2d: the panel from the roundtable/board prototype. Treat `src/m0/` and `spikes/` as records. Don't extend them.
 
 ## Commands
 
 ```
-npm start -- --project <target project dir> [--port 7878]   # daemon: MCP /mcp, panel /, JSON API /api/*
+npm start -- --project <dir> [--port 7878]   # dev: run the daemon from src via tsx (MCP /mcp, panel /, JSON API /api/*)
 npm run smoke       # end-to-end regression: own daemon on port 7891, temp git repo, fake Claude pipe, fake Codex transcripts
 npm run typecheck
+npm run build       # tsc -p tsconfig.build.json → dist/ (src/m0 excluded)
+npm run reinstall   # ai-bridge uninstall → npm pack into release/ → npm i -g → ai-bridge setup → ai-bridge doctor
+npm run cli -- <cmd> [--dry-run]   # run the CLI from this tree (setup/uninstall/init/start/doctor)
 ```
+
+**The user's Claude and Codex point at the globally installed copy** (`%APPDATA%\npm\node_modules\ai-bridge`), not at this tree. After changing `bin/` or `src/`, run `npm run reinstall` so the clients pick it up. `npm run cli -- setup` would point the clients at this dev tree instead. Testing `setup`/`uninstall` against copied config files is not isolated: they also clean `.codex/hooks.json` in the real project folders listed in the config. Use `--dry-run`.
 
 Extend `scripts/smoke.ts` whenever you change engine, proxy or hook behaviour.
 
@@ -31,5 +36,6 @@ Extend `scripts/smoke.ts` whenever you change engine, proxy or hook behaviour.
 - **Identity binding:** each agent_id is bound to one MCP session (`bindingError`). A second session can only take it with `join(takeover=true)`, or after the human presses 释放 on the panel (`release`) or the agent calls `leave`. The proxy replays join with `takeover` after the daemon restarts.
 - `daemon.ts`: HTTP, MCP transports, the JSON API and SSE `/api/stream` (a "change" ping). The panel (`panel.ts`) re-fetches `/api/state` and rebuilds only when the JSON differs. `notify.ts` shows Windows toasts through PowerShell/WinRT; `BRIDGE_NOTIFY=0` disables them.
 - `git.ts`: `submit_handoff` runs `git add -A` and commits. Before that, `changedFiles` is compared with `files_changed` and with other stages' `owns` globs; mismatches become `scope_notes` (shown on the approval card, not blocking). `.bridge/` writes its own `.gitignore`. Parallel tasks in M2c must switch to committing only leased/declared files.
+- `cli.ts` → `ai-bridge` (`bin/ai-bridge.mjs` imports `dist/cli.js`): `setup` writes `~/.claude.json` `mcpServers.bridge` and `~/.codex/config.toml` `[mcp_servers.bridge]` (both: absolute node + installed `bin/bridge-mcp.mjs`), and a **user-level** `~/.codex/hooks.json` Stop hook. It also removes legacy project-level copies for every `[projects.'…']` in Codex's config. It only replaces entries it recognises as the bridge's and backs up every file first. `uninstall` reverses all of it. `doctor` checks paths, hook trust (`[hooks.state.'<hooks.json>:stop:…']`), legacy hooks, proxy and daemon.
 - `config.ts`: `<project>/bridge.config.yaml`, validated with zod. `DEFAULT_CONFIG_YAML` must stay in sync with `bridge.config.example.yaml`.
 - `AGENTS.md` mirrors this file for Codex; update both together.
