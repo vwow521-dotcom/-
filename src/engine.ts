@@ -29,8 +29,9 @@ import type {
   TaskStage,
 } from "./store.js";
 import { changedFiles, commitAll, commitPaths, globMatch, globsOverlap, normGlob } from "./git.js";
+import { CODEX_THREAD, Doorbells, type Doorbell, type DoorbellKind, type RingResult } from "./doorbells/index.js";
 
-export type DoorbellKind = "claude-socket" | "codex-hook" | "poll";
+export type { DoorbellKind } from "./doorbells/index.js";
 export type PresenceStatus = "working" | "armed" | "waiting" | "idle" | "stale" | "offline" | "never-joined";
 
 interface Presence {
@@ -38,10 +39,9 @@ interface Presence {
   sessionId?: string; // the one MCP session allowed to act as this agent
   boundAt?: number;
   lastSeenAt?: number; // last tool call from the bound session
-  registeredDoorbell?: DoorbellKind; // what the proxy / hook registered (used when config says auto)
-  doorbellSeenAt?: number; // last time a doorbell long-poll was open
   doorbellError?: string;
   lastRingAt?: number;
+  lastRingKind?: DoorbellKind;
   // wait_for_mail (poll fallback) metrics, kept from M0
   waiting: boolean;
   waitCalls: number;
@@ -51,23 +51,11 @@ interface Presence {
   gapCount: number;
 }
 
-export interface RingResult {
-  ring: boolean;
-  mailIds?: string[];
-  text?: string;
-}
-
-interface DoorbellWaiter {
-  kind: DoorbellKind;
-  finish: (result: RingResult) => void;
-}
-
 type Result = Record<string, unknown>;
 const err = (error: string): Result => ({ error });
-const DOORBELL_ARMED_MS = 70_000;
-// After a Codex ring, how long to wait for a sign of life before telling the human. A woken Codex may
-// think for a while before its first tool call; a Codex that ignored the block ends its turn within ~1 s.
-const CODEX_WAKE_GRACE_MS = Number(process.env.BRIDGE_CODEX_WAKE_GRACE_SECONDS ?? 20) * 1000;
+// After a ring, how long to wait for a sign of life (any tool call) before trying the next doorbell in the
+// agent's chain or telling the human. A woken agent may think a while before its first tool call.
+const WAKE_GRACE_MS = Number(process.env.BRIDGE_WAKE_GRACE_SECONDS ?? process.env.BRIDGE_CODEX_WAKE_GRACE_SECONDS ?? 30) * 1000;
 const LIVE_MAIL = ["queued", "rung", "stuck"] as const;
 const KIND_LABEL: Record<MeetingTurnKind, string> = { proposal: "提案", critique: "互评", final: "定稿" };
 const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
@@ -75,8 +63,8 @@ const inGlob = (g: string, f: string) => globMatch(normGlob(g), f);
 
 export class Engine {
   private presence = new Map<string, Presence>();
-  private doorbellWaiters = new Map<string, Set<DoorbellWaiter>>();
-  private codexWakeAlerts = new Set<string>(); // mail IDs already reported to the human
+  readonly doorbells: Doorbells;
+  private wakeAlerts = new Set<string>(); // mail IDs already reported to the human as "rang, no response"
   private mailWakers = new Map<string, () => void>();
   private taskWaits = new Map<number, string>(); // task id → why a ready-to-start task hasn't started (lease conflict)
   private logFile: string;
@@ -95,6 +83,16 @@ export class Engine {
     for (const id of Object.keys(cfg.agents))
       this.presence.set(id, { id, waiting: false, waitCalls: 0, maxGapMs: 0, totalGapMs: 0, gapCount: 0 });
     this.logFile = path.join(cfg.projectDir, ".bridge", "bridge-log.jsonl");
+    this.doorbells = new Doorbells(
+      cfg,
+      {
+        store,
+        log: (event, data) => this.log(event, data),
+        product: (agent) => cfg.agents[agent]?.product,
+        boundAt: (agent) => this.presence.get(agent)?.boundAt,
+      },
+      (agent) => !!this.presence.get(agent)?.waiting,
+    );
     store.migrateLegacyRuns(this.pipelineStages());
     this.sweepTimer = setInterval(() => this.sweep(), 5_000);
     this.sweepTimer.unref();
@@ -143,16 +141,13 @@ export class Engine {
 
   // ---------- presence, identity, doorbells ----------
 
+  /** The doorbell the agent should expect (decides what join and the tools tell it about waiting). */
   doorbellKind(agent: string): DoorbellKind {
-    const configured = this.cfg.agents[agent]?.doorbell ?? "auto";
-    if (configured !== "auto") return configured;
-    return this.presence.get(agent)?.registeredDoorbell ?? "poll";
+    return this.doorbells.primary(agent).kind;
   }
 
   doorbellArmed(agent: string) {
-    const p = this.presence.get(agent)!;
-    if (this.doorbellWaiters.get(agent)?.size) return true;
-    return !!p.doorbellSeenAt && Date.now() - p.doorbellSeenAt < DOORBELL_ARMED_MS;
+    return this.doorbells.armed(agent);
   }
 
   status(id: string): PresenceStatus {
@@ -160,11 +155,11 @@ export class Engine {
     const run = this.store.openRun();
     if (run && this.store.agentAttempts(run.id, id, ["in_progress"]).length) return "working";
     if (this.store.mailByStatus(id, ["fetched"]).some((m) => m.kind === "meeting")) return "working";
-    if (this.doorbellKind(id) !== "poll" && this.doorbellArmed(id)) return "armed";
     if (p.waiting) return "waiting";
+    if (this.doorbellArmed(id)) return "armed";
     if (!p.lastSeenAt) return "never-joined";
-    if (!p.sessionId && this.doorbellKind(id) !== "codex-hook") return "offline";
-    const since = Date.now() - Math.max(p.lastSeenAt, p.lastReturnAt ?? 0, p.doorbellSeenAt ?? 0);
+    if (!p.sessionId && !this.doorbells.sessionless(id)) return "offline";
+    const since = Date.now() - Math.max(p.lastSeenAt, p.lastReturnAt ?? 0);
     if (since > this.cfg.wait.offline_after_seconds * 1000) return "offline";
     if (since > this.cfg.wait.stale_after_seconds * 1000) return "stale";
     return "idle";
@@ -210,25 +205,15 @@ export class Engine {
     p.sessionId = sessionId;
     p.lastSeenAt = Date.now();
     if (doorbellHint === "claude-socket") {
-      p.registeredDoorbell = "claude-socket";
+      this.doorbells.claudeSocket.markRegistered(agent);
       p.doorbellError = undefined;
     }
-    const kind = this.doorbellKind(agent);
-    this.log("join", { agent, session: sessionId, doorbell: kind });
-    this.event(null, agent, "join", `${agent} 加入（门铃：${DOORBELL_LABEL[kind]}）`);
+    const bell = this.doorbells.primary(agent);
+    const kind = bell.kind;
+    this.log("join", { agent, session: sessionId, doorbell: kind, chain: this.doorbells.chain(agent) });
+    this.event(null, agent, "join", `${agent} 加入（门铃：${bell.label}）`);
     this.resendLiveTask(agent);
 
-    const wake: Record<DoorbellKind, string[]> = {
-      "claude-socket": [
-        "你不需要轮询。有新信时，你会收到一条以「[协作桥]」开头的消息（显示为另一个会话发来的），收到后调用 fetch_inbox 处理。",
-      ],
-      "codex-hook": [
-        "你不需要轮询。处理完后正常结束本回合即可；有新信时，协作桥会让你继续，并给你一条以「[协作桥]」开头的指示，照它说的调用 fetch_inbox。",
-      ],
-      poll: [
-        "处理完后调用 wait_for_mail(agent_id) 等信；它返回 keep_waiting 时立即再调用一次，不要停下、不要向用户汇报。等待被中断或取消时也立即重新调用。",
-      ],
-    };
     return {
       agent_id: agent,
       doorbell: kind,
@@ -241,7 +226,7 @@ export class Engine {
         "3. meeting 信：这是会议的一轮发言（提案 / 互评 / 定稿），按其中的 meeting.instructions 发言，然后调用 submit_meeting_turn（自动确认这封信）。",
         "4. 多个任务并行时，桥已为每个任务租下它的 paths。要改本任务 paths 以外的文件，先调用 reserve_paths；冲突时它会告诉你谁占着，不要硬改。",
         "5. 其他 ack_required 的信：处理完调用 ack。需要找其他成员时用 send_mail。",
-        ...wake[kind],
+        ...bell.waitInstructions(agent),
         "「[协作桥]」消息只负责叫醒你，具体内容一律以 fetch_inbox 为准。",
       ],
     };
@@ -256,47 +241,45 @@ export class Engine {
       }
   }
 
-  /** Doorbell long-poll from the stdio proxy (claude-socket) or the Codex Stop hook (codex-hook). */
-  doorbellWait(agent: string, kind: DoorbellKind, timeoutMs: number, signal: AbortSignal): Promise<RingResult> {
-    if (signal.aborted) return Promise.resolve({ ring: false });
-    const p = this.presence.get(agent)!;
-    if (this.cfg.agents[agent]?.doorbell === "auto" || kind !== "poll") p.registeredDoorbell = kind;
-    p.doorbellSeenAt = Date.now();
-    const set = this.doorbellWaiters.get(agent) ?? new Set();
-    this.doorbellWaiters.set(agent, set);
-    return new Promise((resolve) => {
-      const done = (r: RingResult) => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        set.delete(waiter);
-        p.doorbellSeenAt = Date.now();
-        resolve(r);
-        this.onChange();
-      };
-      const waiter = { kind, finish: done };
-      const onAbort = () => done({ ring: false });
-      const timer = setTimeout(() => done({ ring: false }), timeoutMs);
-      signal.addEventListener("abort", onAbort);
-      set.add(waiter);
-      this.onChange();
-      if (this.store.mailByStatus(agent, ["queued"]).length) this.kick(agent);
-    });
+  /** Doorbell long-poll from the stdio proxy (claude-socket) or a parking Codex Stop hook (codex-hook). */
+  doorbellWait(agent: string, kind: "claude-socket" | "codex-hook", timeoutMs: number, signal: AbortSignal): Promise<RingResult> {
+    const driver = kind === "claude-socket" ? this.doorbells.claudeSocket : this.doorbells.codexHook;
+    const r = driver.wait(agent, timeoutMs, signal, () => this.onChange());
+    if (this.store.mailByStatus(agent, ["queued"]).length) this.kick(agent);
+    return r;
+  }
+
+  /**
+   * A client tells the bridge where it can be reached outside MCP — today the Codex Stop hook, at the end
+   * of every turn of a conversation that joined, registering its conversation id. `park` tells the hook
+   * whether to stay parked as the doorbell (false when a codex-queue doorbell can now reach the agent).
+   */
+  registerEndpoint(agent: string, kind: string, address: string): Result {
+    if (!this.isAgent(agent)) return err("未知 agent");
+    if (!address) return err("address 不能为空");
+    const prev = this.store.endpoint(agent, kind);
+    this.store.setEndpoint(agent, kind, address);
+    if (prev?.address !== address) this.log("endpoint_registered", { agent, kind, address });
+    let park = true;
+    if (kind === CODEX_THREAD) {
+      const chain = this.doorbells.chain(agent);
+      const q = chain.indexOf("codex-queue");
+      const h = chain.indexOf("codex-hook");
+      park = !(q >= 0 && (h < 0 || q < h) && this.doorbells.codexQueue.available(agent));
+    }
+    this.onChange();
+    if (!park) this.kick(agent); // mail that arrived while the agent was mid-turn
+    return { ok: true, park };
   }
 
   /** The proxy reports whether writing to the Claude messaging socket worked. */
-  doorbellResult(agent: string, mailIds: string[], ok: boolean, error?: string) {
+  doorbellResult(agent: string, mailIds: string[], ok: boolean, error?: string, kind: "claude-socket" | "codex-hook" = "claude-socket") {
     const p = this.presence.get(agent)!;
     if (ok) {
       p.doorbellError = undefined;
       return;
     }
-    p.doorbellError = error ?? "unknown";
-    this.log("doorbell_failed", { agent, error });
-    this.event(null, agent, "doorbell", `${agent} 的门铃失败：${error ?? "未知原因"}，信件会重新投递`);
-    for (const id of mailIds) {
-      const m = this.store.mail(id);
-      if (m?.status === "rung") this.store.setMailStatus([id], "queued");
-    }
+    this.ringFailed(agent, this.doorbells.get(kind), mailIds, error ?? "未知原因", new Set([kind]));
   }
 
   // ---------- postman ----------
@@ -325,8 +308,12 @@ export class Engine {
     return { id, duplicate: false };
   }
 
-  /** Something is waiting for `agent`: wake its poll waiter and ring any open doorbell. */
-  kick(agent: string) {
+  /**
+   * Something is waiting for `agent`: wake its blocked wait_for_mail, and ring the first doorbell in its
+   * chain that can deliver now (skipping `tried`). A failed ring falls through to the next doorbell; a
+   * successful one is checked for a sign of life after WAKE_GRACE_MS.
+   */
+  kick(agent: string, tried: ReadonlySet<DoorbellKind> = new Set()) {
     const queued = this.store.mailByStatus(agent, ["queued"]);
     if (!queued.length) return;
     const mw = this.mailWakers.get(agent);
@@ -334,8 +321,8 @@ export class Engine {
       this.mailWakers.delete(agent);
       mw();
     }
-    const waiters = this.doorbellWaiters.get(agent);
-    if (!waiters?.size) return;
+    const bell = this.doorbells.pick(agent, tried);
+    if (!bell) return;
     const ids = queued.map((m) => m.id);
     const text =
       `[协作桥] ${agent}，你有 ${queued.length} 封新信：` +
@@ -344,41 +331,80 @@ export class Engine {
       `。请调用 bridge 的 fetch_inbox（agent_id="${agent}"）查看并处理。`;
     this.store.setMailStatus(ids, "rung");
     const p = this.presence.get(agent)!;
-    p.lastRingAt = Date.now();
-    this.log("doorbell_ring", { agent, via: this.doorbellKind(agent), mails: ids });
-    this.event(null, agent, "doorbell", `按门铃叫醒 ${agent}（${queued.length} 封信）`);
-    const parked = [...waiters];
-    for (const w of parked) w.finish({ ring: true, mailIds: ids, text });
-    if (parked.some((w) => w.kind === "codex-hook")) {
-      const rangAt = Date.now();
-      setTimeout(() => this.checkCodexWake(agent, ids, rangAt), CODEX_WAKE_GRACE_MS).unref();
-    }
+    const rangAt = Date.now();
+    p.lastRingAt = rangAt;
+    p.lastRingKind = bell.kind;
+    this.log("doorbell_ring", { agent, via: bell.kind, mails: ids });
+    this.event(null, agent, "doorbell", `按门铃叫醒 ${agent}（${bell.label}，${queued.length} 封信）`);
+    const nowTried = new Set([...tried, bell.kind]);
+    bell
+      .ring({ agent, mailIds: ids, text })
+      .catch((e): { ok: false; error: string } => ({ ok: false, error: String(e?.message ?? e) }))
+      .then((o) => {
+        if (o.ok) {
+          if (o.note) this.log("doorbell_note", { agent, via: bell.kind, note: o.note });
+          if (bell.verify) setTimeout(() => this.checkWake(agent, bell, ids, rangAt, nowTried), WAKE_GRACE_MS).unref();
+          return;
+        }
+        this.ringFailed(agent, bell, ids, o.error, nowTried);
+      });
   }
 
-  /** A completed hook poll only proves that the bridge rang. Give Codex a few seconds to fetch. */
-  private checkCodexWake(agent: string, ids: string[], rangAt: number) {
-    const waiters = this.doorbellWaiters.get(agent);
-    if (waiters && [...waiters].some((w) => w.kind === "codex-hook")) return;
-    // Any tool call since the ring means Codex woke up and is working; it will fetch in its own time.
+  /** A ring didn't go through: put the mail back and try the next doorbell in the chain. */
+  private ringFailed(agent: string, bell: Doorbell, ids: string[], error: string, tried: ReadonlySet<DoorbellKind>) {
+    const p = this.presence.get(agent)!;
+    p.doorbellError = `${bell.label}：${error}`;
+    this.log("doorbell_failed", { agent, via: bell.kind, error });
+    this.event(null, agent, "doorbell", `${agent} 的门铃（${bell.label}）失败：${error}，信件会重新投递`);
+    const back = ids.filter((id) => this.store.mail(id)?.status === "rung");
+    this.store.setMailStatus(back, "queued");
+    const next = this.doorbells.pick(agent, tried);
+    this.kick(agent, tried); // also wakes a blocked wait_for_mail
+    if (!next && !this.presence.get(agent)!.waiting) this.alertUnanswered(agent, bell, back);
+    this.onChange();
+  }
+
+  /** No doorbell got through: tell the human once per mail. */
+  private alertUnanswered(agent: string, bell: Doorbell, ids: string[]) {
+    const fresh = ids.filter((id) => !this.wakeAlerts.has(id));
+    if (!fresh.length) return;
+    for (const id of fresh) this.wakeAlerts.add(id);
+    this.event(null, agent, "doorbell", `${agent} 已响铃（${bell.label}），仍有 ${fresh.length} 封信未取`);
+    this.notifyHuman(`协作桥：需要你叫醒 ${agent}`, `${agent} 已响铃但尚未取信。请在该对话里说「继续」。`);
+  }
+
+  /**
+   * After a ring: any tool call from the agent means it woke up and will fetch in its own time, and an agent
+   * already busy on a bridge task reads its mail when it gets to it. Otherwise try the next doorbell, and
+   * when none is left, ask the human.
+   */
+  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, tried: ReadonlySet<DoorbellKind>) {
     if ((this.presence.get(agent)?.lastSeenAt ?? 0) >= rangAt) return;
+    if (this.status(agent) === "working") return;
     const unread = ids.filter((id) => {
-      const status = this.store.mail(id)?.status;
-      return (status === "rung" || status === "queued") && !this.codexWakeAlerts.has(id);
+      const st = this.store.mail(id)?.status;
+      return (st === "rung" || st === "queued") && !this.wakeAlerts.has(id);
     });
     if (!unread.length) return;
-    for (const id of unread) this.codexWakeAlerts.add(id);
-    this.log("codex_wake_timeout", { agent, mails: unread, graceMs: CODEX_WAKE_GRACE_MS });
-    this.event(null, agent, "doorbell", `${agent} 已响铃，Stop hook 已结束等待，仍有 ${unread.length} 封信未取`);
-    this.notifyHuman(`协作桥：需要你叫醒 ${agent}`, `${agent} 已响铃但尚未取信。请在该对话里说「继续」。`);
+    this.log("wake_timeout", { agent, via: bell.kind, mails: unread, graceMs: WAKE_GRACE_MS });
+    const next = this.doorbells.pick(agent, tried);
+    if (next) {
+      this.event(null, agent, "doorbell", `${agent} 对「${bell.label}」没有反应，改用「${next.label}」`);
+      this.store.setMailStatus(unread.filter((id) => this.store.mail(id)?.status === "rung"), "queued");
+      this.kick(agent, tried);
+      return;
+    }
+    this.alertUnanswered(agent, bell, unread);
+    this.onChange();
   }
 
   /** Periodic: re-ring mail nobody fetched, give up after max_rings, flag overdue acks, retry lease-blocked tasks. */
   private sweep() {
     const now = Date.now();
     const { ring_retry_seconds, max_rings, ack_timeout_seconds } = this.cfg.mail;
-    for (const id of this.codexWakeAlerts) {
+    for (const id of this.wakeAlerts) {
       const status = this.store.mail(id)?.status;
-      if (!status || !LIVE_MAIL.some((s) => s === status)) this.codexWakeAlerts.delete(id);
+      if (!status || !LIVE_MAIL.some((s) => s === status)) this.wakeAlerts.delete(id);
     }
     for (const m of this.store.allMailByStatus(["rung"])) {
       if (now - Date.parse(m.rung_at!) < ring_retry_seconds * 1000) continue;
@@ -386,7 +412,7 @@ export class Engine {
         this.store.setMailStatus([m.id], "stuck");
         this.log("mail_stuck", { id: m.id, to: m.to_agent });
         this.event(m.run_id, m.to_agent, "stuck", `${m.to_agent} 没有响应门铃：「${m.subject}」`);
-        if (!this.codexWakeAlerts.has(m.id))
+        if (!this.wakeAlerts.has(m.id))
           this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `门铃按了 ${m.ring_count} 次没有回应。请在 ${m.to_agent} 里说「继续」。`);
       } else {
         this.store.setMailStatus([m.id], "queued");
@@ -401,7 +427,7 @@ export class Engine {
       this.store.setMailStatus([m.id], "stuck");
       this.log("mail_stuck", { id: m.id, to: m.to_agent, reason: "no doorbell" });
       this.event(m.run_id, m.to_agent, "stuck", `${m.to_agent} 的门铃没有接上，「${m.subject}」送不到`);
-      if (!this.codexWakeAlerts.has(m.id))
+      if (!this.wakeAlerts.has(m.id))
         this.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `${m.to_agent} 现在没有在等信。请在 ${m.to_agent} 里说「继续」。`);
     }
     for (const m of this.store.allMailByStatus(["fetched"])) {
@@ -1415,12 +1441,6 @@ export class Engine {
     return { ok: true };
   }
 
-  registerCodexThread(sessionId: string, agent: string): Result {
-    if (!this.isAgent(agent)) return err("未知 agent");
-    this.store.registerCodexThread(sessionId, agent);
-    return { ok: true };
-  }
-
   // ---------- read model for the panel / API ----------
 
   snapshot() {
@@ -1431,18 +1451,21 @@ export class Engine {
     const handoffs = run ? this.store.handoffs(run.id) : [];
     const tasks = run ? this.store.tasks(run.id) : [];
     const keyOf = (id: number | null) => (id ? tasks.find((t) => t.id === id)?.key ?? null : null);
-    let codexWake: string | undefined;
+    let unanswered: string | undefined;
     const agents = this.agentIds().map((id) => {
       const p = this.presence.get(id)!;
       const pending = this.store.mailByStatus(id, [...LIVE_MAIL]);
-      if (!codexWake && pending.some((m) => this.codexWakeAlerts.has(m.id))) codexWake = id;
+      if (!unanswered && pending.some((m) => this.wakeAlerts.has(m.id))) unanswered = id;
       const unacked = this.store.mailByStatus(id, ["fetched"]).filter((m) => m.ack_required);
       return {
         id,
         roles: this.rolesOf(id),
         status: this.status(id),
         doorbell: this.doorbellKind(id),
+        doorbellLabel: this.doorbells.primary(id).label,
+        doorbellChain: this.doorbells.chain(id),
         doorbellArmed: this.doorbellArmed(id),
+        lastRingVia: p.lastRingKind ? this.doorbells.get(p.lastRingKind).label : null,
         doorbellError: p.doorbellError ?? null,
         binding: p.sessionId
           ? {
@@ -1454,23 +1477,24 @@ export class Engine {
           : null,
         pendingMail: pending.length,
         stuckMail: pending.filter((m) => m.status === "stuck").length,
+        unansweredMail: pending.filter((m) => this.wakeAlerts.has(m.id)).length, // rang, no response
         unackedMail: unacked.length,
         waitCalls: p.waitCalls,
-        lastSeenAt: p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0, p.doorbellSeenAt ?? 0)).toISOString() : null,
+        lastSeenAt: p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0)).toISOString() : null,
         lastRingAt: p.lastRingAt ? new Date(p.lastRingAt).toISOString() : null,
       };
     });
     let attention: { kind: "fallback" | "stale"; agent: string; message: string } | null = null;
     const stuck = agents.find((a) => a.stuckMail > 0);
     if (stuck) attention = { kind: "fallback", agent: stuck.id, message: `${stuck.id} 没有响应门铃，有 ${stuck.stuckMail} 封信送不到。请在 ${stuck.id} 里说「继续」。` };
-    else if (codexWake) attention = { kind: "fallback", agent: codexWake, message: `${codexWake} 已响铃但尚未取信。请在对应对话里说「继续」。` };
+    else if (unanswered) attention = { kind: "fallback", agent: unanswered, message: `${unanswered} 已响铃但尚未取信。请在对应对话里说「继续」。` };
     else if (run && (run.status === "active" || run.status === "awaiting_approval"))
       for (const l of lives) {
         if (l.status !== "ready" && l.status !== "in_progress") continue;
         const st = this.status(l.agent);
         if (st === "never-joined")
           attention = { kind: "fallback", agent: l.agent, message: `轮到 ${l.agent}，但它还没有加入协作桥。请在 ${l.agent} 里粘贴启动提示词。` };
-        else if (st === "offline" && this.doorbellKind(l.agent) !== "codex-hook")
+        else if (st === "offline" && !this.doorbells.sessionless(l.agent))
           attention = { kind: "fallback", agent: l.agent, message: `轮到 ${l.agent}，但它不在线。请在 ${l.agent} 里说「继续」。` };
         else if (st === "stale") attention = { kind: "stale", agent: l.agent, message: `${l.agent} 一段时间没有响应，可能是网络波动，正在等它恢复。` };
         if (attention) break;
@@ -1508,7 +1532,7 @@ export class Engine {
       attention,
       questions: this.store.openQuestions(),
       mail: this.store.recentMail(25).map((m) => ({ id: m.id, from: m.from_agent, to: m.to_agent, kind: m.kind, subject: m.subject, status: m.status, ring_count: m.ring_count, created_at: m.created_at, overdue: !!m.overdue_flagged })),
-      codexThreads: this.store.codexThreads().slice(0, 5),
+      endpoints: this.store.endpoints(),
       notes: this.store.notes().slice(-20).reverse(),
       events: this.store.recentEvents(40),
       recentRuns: this.store.recentRuns(10),
@@ -1516,8 +1540,3 @@ export class Engine {
   }
 }
 
-export const DOORBELL_LABEL: Record<DoorbellKind, string> = {
-  "claude-socket": "Claude 消息注入",
-  "codex-hook": "Codex Stop hook",
-  poll: "轮询",
-};

@@ -158,7 +158,7 @@ app.post("/api/mail", (req, res) => {
   reply(res, engine.sendFromHuman(to, t));
 });
 
-// Doorbells: the stdio proxy (claude-socket) and the Codex Stop hook long-poll here.
+// Parked doorbells: the stdio proxy (claude-socket) and a parking Codex Stop hook (codex-hook) long-poll here.
 app.get("/api/doorbell/wait", async (req, res) => {
   const agent = String(req.query.agent ?? "");
   const kind = String(req.query.kind ?? "");
@@ -169,7 +169,7 @@ app.get("/api/doorbell/wait", async (req, res) => {
   res.on("close", () => ac.abort());
   const r = await engine.doorbellWait(agent, kind as "claude-socket" | "codex-hook", timeoutMs, ac.signal);
   if (!res.writableEnded && !ac.signal.aborted) res.json(r);
-  else if (r.ring && r.mailIds) engine.doorbellResult(agent, r.mailIds, false, "门铃连接在送达前断开");
+  else if (r.ring && r.mailIds) engine.doorbellResult(agent, r.mailIds, false, "门铃连接在送达前断开", kind as "claude-socket" | "codex-hook");
 });
 app.post("/api/doorbell/result", (req, res) => {
   const agent = String(req.body?.agent ?? "");
@@ -177,8 +177,14 @@ app.post("/api/doorbell/result", (req, res) => {
   engine.doorbellResult(agent, Array.isArray(req.body?.mailIds) ? req.body.mailIds.map(String) : [], !!req.body?.ok, req.body?.error);
   res.json({ ok: true });
 });
+// Where an agent's client can be reached outside MCP. The Codex Stop hook registers its conversation id
+// (kind "codex-thread") at the end of every turn; the answer tells it whether to park as the doorbell.
+app.post("/api/agents/:id/endpoint", (req, res) => {
+  reply(res, engine.registerEndpoint(req.params.id, String(req.body?.kind ?? ""), String(req.body?.address ?? "")));
+});
+// Pre-0.5 hooks.
 app.post("/api/codex/thread", (req, res) => {
-  reply(res, engine.registerCodexThread(String(req.body?.session_id ?? ""), String(req.body?.agent ?? "")));
+  reply(res, engine.registerEndpoint(String(req.body?.agent ?? ""), "codex-thread", String(req.body?.session_id ?? "")));
 });
 
 app.get("/api/commits/:sha", async (req, res) => {

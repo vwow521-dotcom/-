@@ -232,15 +232,16 @@ function render(s) {
     h += '<div class="card" style="border-color:var(--acc)"><h2>' + esc(q.agent) + " 问你</h2><div>" + esc(q.question) +
       '</div><div class="row" style="margin-top:8px"><input id="ans-' + q.id + '" data-keep class="grow" placeholder="你的回答"><button class="primary" onclick="answer(' + q.id + ')">回答</button></div></div>';
 
-  const bell = { "claude-socket": "Claude 消息注入", "codex-hook": "Codex Stop hook", poll: "轮询" };
   h += '<div class="card"><h2>成员</h2><table><tr><th>agent</th><th>负责</th><th>状态</th><th>门铃</th><th>信件</th><th>上次活动</th><th>发消息</th></tr>' +
     s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) +
       (a.binding ? '<br><small class="mute" title="绑定的会话 ' + esc(a.binding.session) + '">绑定于 ' + t(a.binding.since) +
         (a.binding.open ? "" : "（连接已断）") + ' <a href="#" onclick="releaseAgent(\\'' + esc(a.id) + '\\');return false">释放</a></small>' : "") +
       "</td><td><small>" +
-      esc(bell[a.doorbell] || a.doorbell) + (a.doorbell === "poll" ? "" : a.doorbellArmed ? ' <span class="s-working">●</span>' : ' <span class="mute">○</span>') +
+      '<span title="门铃顺序：' + esc((a.doorbellChain || []).join(" → ")) + '">' + esc(a.doorbellLabel || a.doorbell) + "</span>" +
+      (a.doorbell === "poll" ? "" : a.doorbellArmed ? ' <span class="s-working">●</span>' : ' <span class="mute">○</span>') +
+      (a.lastRingVia && a.lastRingVia !== a.doorbellLabel ? '<br><span class="mute">上次按铃：' + esc(a.lastRingVia) + "</span>" : "") +
       (a.doorbellError ? '<br><span class="err">' + esc(a.doorbellError) + "</span>" : "") + "</small></td><td><small>" +
-      (a.pendingMail ? "未取 " + a.pendingMail : "") + (a.stuckMail ? ' <span class="err">送不到 ' + a.stuckMail + "</span>" : "") +
+      (a.pendingMail ? "未取 " + a.pendingMail : "") + (a.stuckMail ? ' <span class="err">送不到 ' + a.stuckMail + "</span>" : "") + (a.unansweredMail ? ' <span class="err">叫不醒 ' + a.unansweredMail + "</span>" : "") +
       (a.unackedMail ? " 待确认 " + a.unackedMail : "") + (!a.pendingMail && !a.unackedMail ? "—" : "") +
       '</small></td><td><span data-ago="' + esc(a.lastSeenAt || "") + '">—</span></td>' +
       '<td><div class="row" style="flex-wrap:nowrap"><input id="msg-' + esc(a.id) + '" data-keep placeholder="给 ' + esc(a.id) + ' 发消息" style="min-width:140px">' +

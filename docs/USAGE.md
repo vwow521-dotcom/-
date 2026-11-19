@@ -5,7 +5,7 @@
 | 成员 | 门铃 | 由谁配置 |
 |---|---|---|
 | Claude 桌面版（Code 标签页） | 往 Claude 的消息套接字注入一条「[协作桥]」消息 | `ai-bridge setup` |
-| Codex（ChatGPT 桌面版） | Stop hook 停靠等信，有信时让 Codex 继续 | `ai-bridge setup`，再在 Codex 里信任一次 hook |
+| Codex（ChatGPT 桌面版） | 桥运行 `codex queue` 往它的对话里排一条「[协作桥]」消息，Codex 空闲时几秒内开始新一轮；找不到 `codex` 命令或排队失败时，退回 Stop hook 停靠 | `ai-bridge setup`，再在 Codex 里信任一次 hook（hook 负责登记对话 ID） |
 | 其他，或门铃失效时 | AI 循环调用 `wait_for_mail` | 无需配置 |
 
 ## 1. 安装（一次）
@@ -60,9 +60,13 @@ Codex：
 你是 AI 协作桥中的 codex。调用 bridge 的 join（agent_id = "codex"），然后严格按它返回的 protocol 工作。交接单和进度汇报用中文。
 ```
 
-`join` 会告诉 AI 它用的是哪种门铃、该怎么等信。
+`join` 会告诉 AI 它用的是哪种门铃、该怎么等信。门铃按 `bridge.config.yaml` 里成员的 `product` 自动选择（`doorbell: auto`）：Codex 依次用「Codex 队列消息 → Codex Stop hook → 轮询」，Claude 依次用「Claude 消息注入 → 轮询」。前一个按了铃 30 秒没动静，桥会换下一个，都不行再通知你。面板「成员」表的门铃一栏悬停可以看到完整顺序。
 
-Codex 的工作对话停靠等信时，你想直接跟它说话，先点停止再输入，跟平常一样秒回。也可以直接在面板上给它发消息，不用点停止。停靠满 10 分钟还没有信，它会回一句「待命」，然后重新停靠（心跳）。
+**旧项目要改一行配置：** 0.4 及以前生成的 `bridge.config.yaml` 里写的是 `codex: { product: codex, doorbell: codex-hook }`，这样只会用 Stop hook。改成 `doorbell: auto` 才会用上队列消息。
+
+Codex 第一次加入后，要等它结束一轮，hook 才能登记它的对话 ID；在这之前来的信会先排着，登记后立刻送达。
+
+用队列消息时，Codex 每一轮都正常结束，你随时可以直接在它的对话里说话。只有退回 Stop hook 停靠时：你想直接跟它说话，先点停止再输入；也可以在面板上给它发消息。停靠满 10 分钟还没有信，它会回一句「待命」，然后重新停靠（心跳）。
 
 ## 4. 日常流程
 
@@ -96,7 +100,7 @@ Codex 的工作对话停靠等信时，你想直接跟它说话，先点停止�
 
 | 面板 / 通知 | 含义 | 你要做的 |
 |---|---|---|
-| Codex「已响铃但尚未取信」 | 响铃约 20 秒后，Codex 既没有调用任何工具、也没有取信，Stop hook 也不在等信（多半是 Codex 忽略了唤醒，直接结束了这一轮） | 在对应对话里说「继续」。排查时可查看 `%TEMP%/ai-bridge/codex-stop-hook.jsonl`，其中包含 hook 收到的完整输入、停靠时长和输出 |
+| 成员表「叫不醒」/ 通知「已响铃但尚未取信」 | 门铃顺序里能用的都按过了，30 秒内对方没有调用任何工具、也没有取信 | 在对应对话里说「继续」。排查 Codex 时看 `.bridge/bridge-log.jsonl` 里的 `codex_queue`、`doorbell_ring`、`wake_timeout`，以及 `%TEMP%/ai-bridge/codex-stop-hook.jsonl` |
 | 某封信"送不到"，通知"需要你叫醒 X" | 门铃按了 3 次（间隔 2 分钟）X 都没来取信，或者 X 当时没在等信 | 去 X 里说「继续」；会话没了就新开一个，重新粘贴启动提示词 |
 | "确认超时" | AI 取走了需要确认的信，10 分钟没有确认 | 看看它是不是卡住了 |
 | 门铃一栏显示红字错误 | Claude 消息注入失败，比如 Claude 更新后接口变了 | 信件会重新投递；一直失败的话，在 Claude 里说「改用 wait_for_mail 等信」 |

@@ -4,6 +4,8 @@
 // D: meeting rounds → approved plan → task DAG with parallel tasks, one task per agent at a time, leases, scoped commits.
 // B: stdio proxy as Claude doorbell, writing into a fake CLAUDE_CODE_MESSAGING_SOCKET named pipe.
 // C: Codex Stop hook doorbell against fake transcripts.
+// E: codex-queue doorbell (`codex queue` via a fake CLI in an isolated CODEX_HOME): hook registers and
+//    doesn't park, mail → codex queue, dedupe against Codex's queue DB, failure → hook parks as fallback.
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -28,7 +30,7 @@ sh("add", "-A");
 sh("commit", "-qm", "init");
 fs.writeFileSync(
   path.join(proj, "bridge.config.yaml"),
-  `agents: { claude: {}, codex: {}, pbot: {}, hbot: {}, hbot2: {}, hbot3: { doorbell: codex-hook } }
+  `agents: { claude: {}, codex: {}, pbot: {}, hbot: {}, hbot2: {}, hbot3: { doorbell: codex-hook }, qbot: { product: codex } }
 pipeline:
   - { id: plan, role: 规划, agent: claude, gate: true, owns: [DESIGN.md] }
   - { id: implement, role: 编码, agent: codex }
@@ -39,11 +41,27 @@ notify: { enabled: false }
 `,
 );
 
+// A fake Codex CLI: logs its argv; fails while <CODEX_HOME>/fail exists. Never touches the real Codex.
+const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-codex-"));
+const fakeCodex = path.join(codexHome, "fake-codex.mjs");
+const fakeCodexLog = path.join(codexHome, "calls.jsonl");
+fs.writeFileSync(
+  fakeCodex,
+  `import fs from "node:fs";
+const dir = ${JSON.stringify(codexHome)};
+fs.appendFileSync(${JSON.stringify(fakeCodexLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
+if (fs.existsSync(dir + "/fail")) { process.stderr.write("boom"); process.exit(1); }
+const i = process.argv.indexOf("--thread");
+console.log("Queued message m-1 for thread " + process.argv[i + 1] + ".");
+`,
+);
+const codexCalls = () => (fs.existsSync(fakeCodexLog) ? fs.readFileSync(fakeCodexLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : []);
+
 let daemon: ChildProcess;
 async function startDaemon() {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", proj, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_CODEX_WAKE_GRACE_SECONDS: "6" },
+    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: "6", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -404,7 +422,7 @@ try {
   const parked = runHook(hookInput, { BRIDGE_PARK_SECONDS: "20" });
   await sleep(1500);
   s = await state();
-  check(s.agents.find((a: any) => a.id === "hbot").doorbellArmed && s.codexThreads.some((x: any) => x.session_id === "s-1"), "joined thread parks and registers");
+  check(s.agents.find((a: any) => a.id === "hbot").doorbellArmed && s.endpoints.some((x: any) => x.agent === "hbot" && x.address === "s-1"), "joined thread parks and registers");
   const rangAt = Date.now();
   const ringMail = await api("/api/mail", { to: "hbot", text: "新任务" });
   h = await parked;
@@ -484,6 +502,72 @@ try {
   h = await orphan;
   check(h.out === "{}" && h.ms < 15000, `bridge gone for good → Codex released after grace (${h.ms} ms)`);
   await startDaemon();
+
+  // ===== E: codex-queue doorbell =====
+  console.log("— E: codex-queue doorbell (fake codex CLI)");
+  const qbot = await connect("qbot");
+  const qj = await call(qbot, "join", { agent_id: "qbot" });
+  check(qj.doorbell === "codex-queue" && qj.protocol.some((l: string) => l.includes("正常结束本回合")), "product codex joins with the codex-queue doorbell");
+  const early = await api("/api/mail", { to: "qbot", text: "对话还没登记时来的信" });
+  await sleep(300);
+  check((await state()).mail.find((m: any) => m.id === early.json.id)?.status === "queued" && codexCalls().length === 0, "before the hook registers the thread, mail waits (nothing to queue to)");
+  const qtx = path.join(proj, "rollout-q.jsonl");
+  fs.writeFileSync(qtx, joinLine("qbot") + "\n");
+  h = await runHook({ session_id: "thread-q1", turn_id: "t1", stop_hook_active: false, transcript_path: qtx }, { BRIDGE_PARK_SECONDS: "20" });
+  check(h.out === "{}" && h.ms < 5000, `hook registers the thread and does not park (${h.ms} ms)`);
+  for (let i = 0; i < 30 && codexCalls().length < 1; i++) await sleep(100);
+  let calls = codexCalls();
+  check(
+    calls.length === 1 && calls[0][0] === "queue" && calls[0][calls[0].indexOf("--thread") + 1] === "thread-q1" && /\[协作桥\].*fetch_inbox/.test(calls[0][calls[0].indexOf("--message") + 1]),
+    "registration rings the waiting mail via `codex queue --thread <id> --message …`",
+  );
+  s = await state();
+  check(s.mail.find((m: any) => m.id === early.json.id)?.status === "rung" && s.agents.find((a: any) => a.id === "qbot").doorbellArmed, "mail rung, codex-queue doorbell armed");
+  await call(qbot, "fetch_inbox", { agent_id: "qbot" });
+
+  // Codex already has a wake message queued for this thread → don't stack another.
+  const { DatabaseSync } = await import("node:sqlite");
+  const qdb = new DatabaseSync(path.join(codexHome, "queue_1.sqlite"));
+  qdb.exec("CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL, queue_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL)");
+  qdb.prepare("INSERT INTO queued_items VALUES ('x', 'thread-q1', '{}', 1, 0, 0)").run();
+  const dup = await api("/api/mail", { to: "qbot", text: "队列里已有叫醒消息" });
+  await sleep(800);
+  check(codexCalls().length === 1 && (await state()).mail.find((m: any) => m.id === dup.json.id)?.status === "rung", "a wake already waiting in Codex's queue is not stacked");
+  qdb.exec("DELETE FROM queued_items");
+  qdb.close();
+  await call(qbot, "fetch_inbox", { agent_id: "qbot" });
+
+  // Rung, but no tool call within the grace → the human is told (no other doorbell is available).
+  const silent = await api("/api/mail", { to: "qbot", text: "没人理的信" });
+  await sleep(7500);
+  s = await state();
+  check(
+    codexCalls().length === 2 && s.agents.find((a: any) => a.id === "qbot").unansweredMail === 1 && s.events.some((e: any) => e.agent === "qbot" && e.text.includes("仍有")),
+    "no sign of life after a codex-queue ring → alert",
+  );
+  await call(qbot, "fetch_inbox", { agent_id: "qbot" });
+  check((await state()).agents.find((a: any) => a.id === "qbot").unansweredMail === 0, "fetching clears the alert");
+
+  // `codex queue` fails → mail goes back, the human is told at once, and the next Stop hook parks as fallback.
+  fs.writeFileSync(path.join(codexHome, "fail"), "");
+  const broken = await api("/api/mail", { to: "qbot", text: "codex queue 坏了" });
+  for (let i = 0; i < 30; i++) {
+    s = await state();
+    if (s.agents.find((a: any) => a.id === "qbot").doorbellError) break;
+    await sleep(100);
+  }
+  const qa = s.agents.find((a: any) => a.id === "qbot");
+  check(
+    qa.doorbellError?.includes("boom") && s.mail.find((m: any) => m.id === broken.json.id)?.status === "queued" && qa.unansweredMail === 1,
+    "failed codex queue → mail requeued, error shown, human alerted immediately",
+  );
+  fs.rmSync(path.join(codexHome, "fail"));
+  const fallback = runHook({ session_id: "thread-q1", turn_id: "t2", stop_hook_active: false, transcript_path: qtx }, { BRIDGE_PARK_SECONDS: "20" });
+  h = await fallback;
+  check(JSON.parse(h.out).decision === "block" && JSON.parse(h.out).reason.includes("fetch_inbox"), "after a queue failure the hook parks again and delivers the mail itself");
+  await call(qbot, "fetch_inbox", { agent_id: "qbot" });
+  const qtrace = fs.readFileSync(path.join(proj, ".bridge", "bridge-log.jsonl"), "utf8");
+  check(qtrace.includes('"event":"codex_queue"') && qtrace.includes('"via":"codex-queue"'), "bridge log records codex queue calls and rings by doorbell");
 } catch (e) {
   console.error(e);
   failed = true;

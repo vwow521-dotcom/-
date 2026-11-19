@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-// Codex Stop hook = the Codex doorbell (verified in S2).
+// Codex Stop hook: registers the Codex conversation with the bridge, and is the fallback Codex doorbell.
 //
-// Runs every time a Codex turn ends. If this thread joined the bridge (found by reading the session
-// transcript for a completed `bridge.join` MCP call), it parks here and long-polls the daemon for
-// mail — the model is idle and costs nothing. Mail arrives → {"decision":"block","reason":…}, which
-// Codex treats as a new user prompt. Threads that never joined return {} immediately, so the user's
-// other conversations in the project are unaffected. Pressing Stop in Codex releases a parked hook.
+// Runs every time a Codex turn ends. Threads that never joined the bridge (no completed `bridge.join`
+// MCP call in the session transcript) return {} immediately, so the user's other conversations are
+// unaffected. A joined thread registers its id (session_id) as the agent's "codex-thread" endpoint.
+// When the bridge can reach the agent through `codex queue` (codex-queue doorbell) it answers park:false
+// and the hook returns {} at once, so the turn ends and queued messages can start the next one.
+// Otherwise (no codex CLI found, an older bridge, or the doorbell config says so) the hook parks and
+// long-polls the daemon for mail — the model is idle and costs nothing. Mail arrives →
+// {"decision":"block","reason":…}, which Codex treats as a new user prompt (but drops some of them,
+// see docs/ARCHITECTURE-v2.md §14). Pressing Stop in Codex releases a parked hook.
 //
 // Env: BRIDGE_URL (default http://127.0.0.1:7878), BRIDGE_PARK_SECONDS (default 600; keep it below the
 // hook "timeout" in hooks.json), BRIDGE_HEARTBEAT=0 to let Codex stop instead of re-parking after a
@@ -54,6 +58,20 @@ function joinedAgent(transcriptPath) {
   return agent;
 }
 
+/** Tell the bridge this conversation's id. Returns whether to park as the doorbell (old bridges: always). */
+async function register(agent, sessionId) {
+  const post = (url, body) =>
+    fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const r = await post(`${BASE}/api/agents/${encodeURIComponent(agent)}/endpoint`, { kind: "codex-thread", address: sessionId ?? "" });
+  if (r.status >= 500) throw new Error("HTTP " + r.status);
+  if (r.status === 404) {
+    await post(`${BASE}/api/codex/thread`, { session_id: sessionId, agent }); // bridge before 0.5
+    return true;
+  }
+  const j = await r.json().catch(() => ({}));
+  return j.park !== false;
+}
+
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (input += d));
@@ -94,12 +112,12 @@ process.stdin.once("end", async () => {
   while (Date.now() - start < PARK_MS) {
     try {
       if (!registered) {
-        await fetch(`${BASE}/api/codex/thread`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ session_id: ev.session_id, agent }),
-        });
+        const park = await register(agent, ev.session_id);
         registered = true;
+        log("registered", { ...context, agent, park });
+        // The bridge reaches this conversation through `codex queue` now: let the turn end, so queued
+        // messages (which wait for the turn to finish) start a new one.
+        if (!park) return out({}, "queue_doorbell");
       }
       const remaining = Math.ceil((PARK_MS - (Date.now() - start)) / 1000);
       const r = await fetch(`${BASE}/api/doorbell/wait?agent=${encodeURIComponent(agent)}&kind=codex-hook&timeout=${Math.max(1, Math.min(50, remaining))}`);

@@ -1,10 +1,12 @@
 # 复制到目标项目根目录并改名为 bridge.config.yaml。没有这个文件时桥使用下面这套默认配置。
-# agents: 参与协作的身份（agent_id）。doorbell: auto（Claude 经本地转接程序自动登记消息注入）/ codex-hook / poll。
+# agents: 参与协作的身份（agent_id）。product 决定默认门铃；doorbell: auto（按 product 的默认顺序：claude-code → Claude 消息注入、轮询；
+#   codex → Codex 队列消息、Codex Stop hook、轮询），也可以写一个门铃或一个列表，如 [codex-queue, poll]。
+#   可选的门铃：claude-socket / codex-queue / codex-hook / poll。
 # pipeline: 按顺序执行的阶段。gate: true 表示该阶段完成后停下等你在面板上批准；on_reject: 你确认打回时退回到哪个阶段（默认重做本阶段）。
 # owns: 该阶段负责的文件（glob）。其他阶段改了这些文件，会在审批卡片上提示（不阻止）。
 agents:
   claude: { product: claude-code, doorbell: auto }
-  codex:  { product: codex, doorbell: codex-hook }
+  codex:  { product: codex, doorbell: auto }
 pipeline:
   - id: plan
     role: 规划/架构

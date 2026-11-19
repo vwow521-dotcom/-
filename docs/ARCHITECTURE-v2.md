@@ -262,3 +262,35 @@ Codex 0.170 桌面版常驻一个 app-server，控制套接字在 `~/.codex/app-
 - 任务描述的勘误入口；共享的、不提交的工作区（如 `.bridge/shared/`）放验收脚本。
 - 只需确认的用户消息，在叫醒提示里直接带正文摘要。
 
+## 15. 门铃驱动与 Codex 队列门铃（0.5，2026-11-19）
+
+### 为什么换掉 Stop hook 停靠
+
+日志证明 Codex 收到 hook 的 `block` 后经常直接结束这一轮：两次测试中 9 次 block 只有 2 次生效（那两次 hook 都停靠了 2 分钟以上），其中一次是这一轮的第一次 block（`stop_hook_active=false`），所以「一轮只认一次」也解释不了。网上没有找到这个现象的说明。
+
+`codex queue --thread <对话ID> --message <文本>`（Codex CLI 0.149 起）往 `~/.codex/queue_1.sqlite` 排一条消息，桌面版自己会处理这个队列，你在 Codex 忙的时候追加的消息也走这里。实测（Codex 0.170）：空闲对话约 6 秒后开始新一轮，记录里是 `turn_trigger: "queue"`，和你打字是同一条路，不会被丢。但 hook 停靠期间这一轮没有结束，排队的消息要等 hook 返回，所以用队列时 hook 不能再停靠。
+
+### 结构：引擎不认识任何产品
+
+```
+引擎：有信给 X → kick(X)
+  └─ Doorbells.pick(X)：按 X 的门铃顺序，取第一个现在能送达的
+       ├─ claude-socket   停靠式：转接程序长轮询，有铃时往 Claude 消息套接字注入
+       ├─ codex-queue     执行式：桥运行 codex queue
+       ├─ codex-hook      停靠式：Stop hook 长轮询，有铃时返回 block
+       └─ poll            AI 自己 wait_for_mail（总在最后）
+  按铃失败 → 信退回、换下一个；按铃成功 → 30 秒内看有没有任何工具调用，没有就换下一个，都不行再通知你
+```
+
+- 每个驱动实现同一组接口（`src/doorbells/types.ts`）：`possible`（能不能为这个成员服务，决定 join 怎么交代）、`available`（现在能不能送达）、`armed`、`ring`、`waitInstructions`，以及 `sessionless`（成员不需要开着的 MCP 会话也能叫醒）和 `verify`（按铃后要不要确认）。
+- 门铃顺序：`agents.<id>.doorbell` 可以写列表、单个门铃或 `auto`；`auto` 按 `product` 取默认值（`PRODUCT_DOORBELLS`）。
+- 成员登记：通用的 `agent_endpoints` 表和 `POST /api/agents/:id/endpoint`，取代 `codex_threads` 和 `/api/codex/thread`（旧路由保留给旧 hook）。Codex 的 Stop hook 每轮结束时登记对话 ID；桥回答 `park:false` 时 hook 立即放行，`park:true`（找不到 codex 命令、排队失败过、配置不用队列）时 hook 照旧停靠，作为兜底。
+- 防止叫醒旧对话：成员如果在登记之后又从新的 MCP 会话加入（多半是新开的对话），旧的对话 ID 不再使用，等新对话第一次结束一轮重新登记。
+- 不重复排队：Codex 队列里已经有这个对话的消息时不再排。
+- 失败处理：`codex queue` 失败后 10 分钟内不再用它，下一次 Stop hook 会停靠作为兜底；没有别的门铃可用时立即通知你。
+
+### 还没做（下一步）
+
+- 第 3 步：产品档案（`src/products/`）接管 `cli.ts` 里各产品的 setup / uninstall / doctor。`doctor` 应检查能否找到 `codex` 命令。
+- 第 4 步：把 `engine.ts` 拆成邮局、身份、调度、会议、租约几个模块。
+

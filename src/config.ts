@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
+import { DOORBELL_KINDS } from "./doorbells/types.js";
 
 const StageSchema = z.object({
   id: z.string().regex(/^[\w-]+$/, "stage id 只能包含字母、数字、_ 和 -"),
@@ -42,9 +43,10 @@ const ConfigSchema = z
       z
         .object({
           product: z.string().optional(),
-          // How the postman wakes this agent. auto = whatever registers (the stdio proxy registers
-          // claude-socket when it runs inside Claude desktop), otherwise poll (wait_for_mail).
-          doorbell: z.enum(["auto", "claude-socket", "codex-hook", "poll"]).default("auto"),
+          // How the postman wakes this agent: an ordered list tried in turn (poll always last), a single
+          // kind, or auto = the product's default chain (src/doorbells/index.ts PRODUCT_DOORBELLS); for an
+          // unknown product, whatever the client registers.
+          doorbell: z.union([z.literal("auto"), z.enum(DOORBELL_KINDS), z.array(z.enum(DOORBELL_KINDS)).min(1)]).default("auto"),
         })
         .default({ doorbell: "auto" }),
     ),
@@ -112,7 +114,7 @@ export type Config = z.infer<typeof ConfigSchema> & { projectDir: string; source
 
 export const DEFAULT_CONFIG_YAML = `agents:
   claude: { product: claude-code, doorbell: auto }
-  codex:  { product: codex, doorbell: codex-hook }
+  codex:  { product: codex, doorbell: auto }
 pipeline:
   - id: plan
     role: 规划/架构

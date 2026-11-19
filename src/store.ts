@@ -193,6 +193,13 @@ export interface Mail {
   overdue_flagged: number; // 0/1, so the human is told only once
 }
 
+export interface AgentEndpoint {
+  agent: string;
+  kind: string;
+  address: string;
+  registered_at: string;
+}
+
 export interface BridgeEvent {
   id: number;
   run_id: number | null;
@@ -243,6 +250,9 @@ export class Store {
       CREATE INDEX IF NOT EXISTS mail_to_status ON mail (to_agent, status);
       CREATE TABLE IF NOT EXISTS codex_threads (
         session_id TEXT PRIMARY KEY, agent TEXT NOT NULL, registered_at TEXT NOT NULL, last_parked_at TEXT);
+      CREATE TABLE IF NOT EXISTS agent_endpoints (
+        agent TEXT NOT NULL, kind TEXT NOT NULL, address TEXT NOT NULL, registered_at TEXT NOT NULL,
+        PRIMARY KEY (agent, kind));
       CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, key TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
         owner TEXT NOT NULL, reviewer TEXT, depends_on TEXT NOT NULL, paths TEXT NOT NULL, stages TEXT NOT NULL,
@@ -263,6 +273,10 @@ export class Store {
     if (!cols("handoffs").includes("scope_notes")) this.db.exec("ALTER TABLE handoffs ADD COLUMN scope_notes TEXT");
     if (!cols("attempts").includes("task_id")) this.db.exec("ALTER TABLE attempts ADD COLUMN task_id INTEGER");
     if (!cols("runs").includes("meeting_id")) this.db.exec("ALTER TABLE runs ADD COLUMN meeting_id INTEGER");
+    // Pre-0.5 Codex thread registrations (codex_threads) → the latest one per agent as its codex-thread endpoint.
+    this.db.exec(`INSERT OR IGNORE INTO agent_endpoints (agent, kind, address, registered_at)
+      SELECT agent, 'codex-thread', session_id, COALESCE(last_parked_at, registered_at) FROM codex_threads c
+      WHERE COALESCE(last_parked_at, registered_at) = (SELECT MAX(COALESCE(last_parked_at, registered_at)) FROM codex_threads WHERE agent = c.agent)`);
   }
 
   /** Pre-M2c runs have no task rows: give each one task (T1) running `stages`, and point its attempts at it. */
@@ -338,17 +352,18 @@ export class Store {
     return this.all<Mail>("SELECT * FROM mail ORDER BY created_at DESC, id DESC LIMIT ?", limit);
   }
 
-  // ---- Codex threads that joined the bridge (session_id from the Stop hook ↔ agent id)
-  registerCodexThread(session_id: string, agent: string) {
+  // ---- where an agent's client can be reached outside MCP (e.g. kind "codex-thread": the Codex conversation id)
+  setEndpoint(agent: string, kind: string, address: string) {
     this.exec(
-      "INSERT INTO codex_threads (session_id, agent, registered_at, last_parked_at) VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET agent = excluded.agent, last_parked_at = excluded.last_parked_at",
-      session_id, agent, now(), now(),
+      "INSERT INTO agent_endpoints (agent, kind, address, registered_at) VALUES (?, ?, ?, ?) ON CONFLICT(agent, kind) DO UPDATE SET address = excluded.address, registered_at = excluded.registered_at",
+      agent, kind, address, now(),
     );
   }
-  codexThreads() {
-    return this.all<{ session_id: string; agent: string; registered_at: string; last_parked_at: string | null }>(
-      "SELECT * FROM codex_threads ORDER BY last_parked_at DESC",
-    );
+  endpoint(agent: string, kind: string) {
+    return this.one<AgentEndpoint>("SELECT * FROM agent_endpoints WHERE agent = ? AND kind = ?", agent, kind);
+  }
+  endpoints() {
+    return this.all<AgentEndpoint>("SELECT * FROM agent_endpoints ORDER BY registered_at DESC");
   }
 
   // ---- runs
