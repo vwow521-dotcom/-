@@ -145,6 +145,7 @@ try {
   check(sub.status === "submitted" && /^[0-9a-f]{40}$/.test(sub.commit), "plan handoff auto-committed");
   let s = await state();
   check(s.run.status === "awaiting_approval", "run waits at plan gate");
+  check(s.timeline.some((x: any) => x.type === "handoff" && x.gate?.attempt_id === s.live.id && x.gate.reject_to === "plan"), "the gated handoff carries its approval card in the timeline");
   check(s.mail.find((m: any) => m.kind === "task" && m.to === "claude")?.status === "acked", "task mail auto-acked by submit_handoff");
 
   const codexWait = call(codex, "wait_for_mail", { agent_id: "codex" });
@@ -236,7 +237,9 @@ try {
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
   check(commits.length === 5 && commits.some((c) => c.includes("审查通过")), `5 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
-  check((await fetch(BASE + "/")).ok, "panel page served");
+  const roomHtml = await (await fetch(BASE + "/")).text();
+  check(roomHtml.includes("/panel/room.js") && (await fetch(BASE + "/panel/room.js")).ok && (await fetch(BASE + "/panel/room.css")).ok, "meeting-room panel and its assets served");
+  check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
 
   await api("/api/runs", { goal: "第二个任务" });
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
@@ -382,7 +385,15 @@ try {
   check(busyMember.waitingForTurn === 1 && busyMember.unansweredMail === 0 && busyMember.stuckMail === 0 &&
     s.attention?.agent !== "codex" && busyRing?.waitingForTurn && busyRing.status === "rung" && busyRing.ring_count === 1,
     "busy ring stays queued through the sweep, with neither retries nor a wake alert");
-  check((await (await fetch(BASE + "/")).text()).includes("排队中，等对方这一轮结束"), "panel includes the busy queue label");
+  check((await (await fetch(BASE + "/panel/room.js")).text()).includes("排队中，等它这一轮结束"), "panel includes the busy queue label");
+  {
+    const tl = (await state()).timeline as any[];
+    const rounds = tl.filter((x) => x.type === "round" && x.meeting_id === mid);
+    check(rounds.length >= 3 && rounds.at(-1).doc_path && rounds[0].turns.length === 2, "timeline has one card per meeting round, the last with the minutes path");
+    check(tl.some((x) => x.type === "sys" && x.cat === "task"), "timeline has task events");
+    check(!tl.some((x) => x.type === "sys" && /发言$/.test(x.text)), "turn events are folded into round cards");
+    check(tl.every((x, i) => i === 0 || tl[i - 1].at <= x.at), "timeline is in time order");
+  }
   sub = await call(codex, "submit_handoff", { agent_id: "codex", summary: "b 完成", files_changed: ["b/one.txt"] });
   const t2files = sh("show", "--name-only", "--format=", sub.commit).split("\n").filter(Boolean);
   check(t2files.length === 1 && t2files[0] === "b/one.txt", `parallel commit holds only the task's files (${t2files.join(",")})`);
@@ -454,6 +465,11 @@ try {
   s = await state();
   check(s.run.status === "done" && s.tasks.every((x: any) => x.status === "done"), "all tasks done → run done");
   check(sh("log", "--format=%s", "-1").includes("T3"), "multi-task commits are labelled with the task key");
+
+  {
+    const tl = (await state()).timeline as any[];
+    check(tl.some((x) => x.type === "handoff" && x.task?.key && x.data.summary), "timeline has handoff cards labelled with their task");
+  }
 
   // ===== B: stdio proxy as the Claude doorbell =====
   console.log("— B: stdio proxy → fake Claude messaging pipe");

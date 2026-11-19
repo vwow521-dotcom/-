@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Bridge 会议室</title>
+<link rel="stylesheet" href="/panel/room.css">
+</head>
+<body>
+<div class="shell">
+  <nav class="rail left" aria-label="成员">
+    <div class="brand">
+      <span class="logo">AI Bridge</span>
+      <span class="sub" id="proj"></span>
+    </div>
+    <section>
+      <h2 class="label">成员</h2>
+      <div id="members"></div>
+    </section>
+    <section class="start">
+      <h2 class="label">发起</h2>
+      <textarea id="goal" rows="3" placeholder="目标或议题，例如：给猜数字游戏加一个难度选项"></textarea>
+      <div id="parts" class="parts"></div>
+      <button type="button" class="btn primary" data-act="startMeeting" title="成员各自提案、互评，定稿出任务清单后再并行分派">开会讨论</button>
+      <button type="button" class="btn" data-act="startRun" title="按配置里的流水线（规划 → 编码 → 审查）一步步做">直接开始（流水线）</button>
+      <button type="button" class="btn danger" data-act="stopRun" id="stopbtn" hidden>停止当前任务</button>
+      <span class="err" id="starterr"></span>
+      <a class="classic" href="/classic">旧版面板</a>
+    </section>
+  </nav>
+
+  <main class="center">
+    <header class="head">
+      <div class="titlerow">
+        <div class="titles">
+          <span class="kicker" id="kicker"></span>
+          <h1 id="title">协作桥</h1>
+        </div>
+        <span class="sub" id="headsub"></span>
+      </div>
+      <div id="banner"></div>
+      <div class="filters" role="group" aria-label="筛选" id="filters"></div>
+    </header>
+    <div class="timeline" id="timeline" aria-live="polite"></div>
+    <form class="composer" id="composer">
+      <div class="targets" role="group" aria-label="发给谁" id="targets"></div>
+      <div id="replybar" class="replybar" hidden></div>
+      <div class="inputrow">
+        <label for="say" class="sr">消息</label>
+        <textarea id="say" rows="1" placeholder="说点什么（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button type="submit" class="btn primary">发送</button>
+      </div>
+      <span class="hint" id="hint"></span>
+      <span class="err" id="sayerr"></span>
+    </form>
+  </main>
+
+  <aside class="rail right" aria-label="现状" id="right"></aside>
+</div>
+<script src="/panel/room.js"></script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import express from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
@@ -95,7 +96,11 @@ engine.context.onChange = () => {
   }, 150);
 };
 
-app.get("/", (_req, res) => {
+// The meeting-room panel is static (panel/ next to src/ and dist/); the pre-0.6 panel stays at /classic.
+const PANEL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "panel");
+app.get("/", (_req, res) => res.sendFile(path.join(PANEL_DIR, "room.html")));
+app.use("/panel", express.static(PANEL_DIR, { index: false }));
+app.get("/classic", (_req, res) => {
   res.type("html").send(PANEL_HTML);
 });
 

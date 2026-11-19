@@ -7,6 +7,7 @@ import { Leases } from "./engine/leases.js";
 import { Meetings } from "./engine/meetings.js";
 import { Postman } from "./engine/postman.js";
 import { Presence } from "./engine/presence.js";
+import { Room } from "./engine/room.js";
 import { Scheduler } from "./engine/scheduler.js";
 import { Workspace } from "./engine/workspace.js";
 import type { Store } from "./store.js";
@@ -49,7 +50,8 @@ export class Engine {
     this.scheduler = new Scheduler(ctx, this.presence, this.postman, this.leases);
     this.meetings = new Meetings(ctx, this.presence, this.postman, this.scheduler);
     this.chat = new Chat(ctx, this.presence, this.postman);
-    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, this.chat, doorbells);
+    const room = new Room(ctx, this.postman, this.scheduler, this.meetings, this.chat);
+    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, this.chat, room, doorbells);
     this.postman.startSweep(() => this.scheduler.retryBlockedTasks());
   }
 }

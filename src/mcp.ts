@@ -7,7 +7,7 @@ import type { Result } from "./engine/context.js";
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
 
 export function buildServer(engine: Engine): McpServer {
-  const server = new McpServer({ name: "ai-bridge", version: "0.5.0" });
+  const server = new McpServer({ name: "ai-bridge", version: "0.6.0" });
   const ids = engine.presence.agentIds().join(", ");
   const agentId = z.string().describe(`你的身份，可选：${ids}`);
   const withAgent = async (agent: string, session: string | undefined, run: () => Result | Promise<Result>) => {

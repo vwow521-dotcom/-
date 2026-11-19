@@ -1,6 +1,7 @@
 // Project context, progress, notes, questions and the panel's read model.
 import type { Doorbells } from "../doorbells/index.js";
 import type { Chat } from "./chat.js";
+import type { Room } from "./room.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import type { Leases } from "./leases.js";
 import type { Meetings } from "./meetings.js";
@@ -17,6 +18,7 @@ export class Workspace {
     private readonly leases: Leases,
     private readonly meetings: Meetings,
     private readonly chat: Chat,
+    private readonly room: Room,
     private readonly doorbells: Doorbells,
   ) {}
 
@@ -119,6 +121,8 @@ export class Workspace {
     const tasks = run ? this.ctx.store.tasks(run.id) : [];
     const keyOf = (id: number | null) => (id ? tasks.find((t) => t.id === id)?.key ?? null : null);
     const waitingForTurn = new Set<string>();
+    const openMeeting = this.ctx.store.openMeeting();
+    const spokenNow = openMeeting ? this.ctx.store.meetingTurns(openMeeting.id).filter((t) => t.round === openMeeting.round).map((t) => t.agent) : [];
     const agents = this.presence.agentIds().map((id) => {
       const p = this.presence.get(id)!;
       const pending = this.ctx.store.mailByStatus(id, [...LIVE_MAIL]);
@@ -128,6 +132,15 @@ export class Workspace {
       return {
         id,
         roles: this.presence.rolesOf(id),
+        // What it is on right now: live stages of the open run, and a meeting turn it still owes.
+        doing: [
+          ...(run && (run.status === "active" || run.status === "awaiting_approval")
+            ? this.ctx.store.agentAttempts(run.id, id, ["in_progress", "ready", "awaiting_approval"]).map((a) => ({ task: tasks.length > 1 ? keyOf(a.task_id) : null, stage: a.stage_id, status: a.status }))
+            : []),
+          ...(openMeeting?.status === "collecting" && this.meetings.expectedSpeakers(openMeeting).includes(id) && !spokenNow.includes(id)
+            ? [{ task: null, stage: `会议第 ${openMeeting.round} 轮`, status: "meeting" }]
+            : []),
+        ],
         status: this.presence.status(id),
         doorbell: this.presence.doorbellKind(id),
         doorbellLabel: this.doorbells.primary(id).label,
@@ -206,6 +219,7 @@ export class Workspace {
         ring_count: m.ring_count, created_at: m.created_at, overdue: !!m.overdue_flagged, waitingForTurn: waitingForTurn.has(m.id),
       })),
       chat: this.chat.recent(50, (a) => this.postman.isBusy(a)),
+      timeline: this.room.timeline(),
       endpoints: this.ctx.store.endpoints(),
       notes: this.ctx.store.notes().slice(-20).reverse(),
       events: this.ctx.store.recentEvents(40),
