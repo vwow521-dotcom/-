@@ -1,0 +1,183 @@
+// Single-page panel. Renders /api/state client-side and re-renders on SSE "change" events.
+export const PANEL_HTML = /* html */ `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Bridge</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--fg:#1d1d1f;--mute:#6b6b70;--line:#e3e3e0;--acc:#5b5bd6;--ok:#2f9e5b;--warn:#c98a00;--bad:#d64545;--chip:#efeff3}
+@media (prefers-color-scheme:dark){:root{--bg:#161618;--card:#1f1f22;--fg:#ececee;--mute:#9a9aa2;--line:#303035;--chip:#2a2a30}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:20px;margin:0}h2{font-size:15px;margin:0 0 10px}small,.mute{color:var(--mute)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.grow{flex:1}
+textarea,input{width:100%;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:inherit;border-radius:8px;padding:6px 14px;cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}button.danger{color:var(--bad)}
+.chip{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--chip);font-size:12px}
+.s-working,.s-in_progress,.s-armed,.m-acked{color:var(--ok)}.m-queued,.m-rung,.m-fetched{color:var(--acc)}.m-stuck{color:var(--bad)}.m-void{color:var(--mute)}.s-waiting,.s-ready{color:var(--acc)}.s-stale,.s-awaiting_approval{color:var(--warn)}.s-offline,.s-never-joined,.s-rejected,.s-cancelled{color:var(--bad)}
+.pipe{display:flex;gap:8px;flex-wrap:wrap}.stage{flex:1;min-width:150px;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.stage.live{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}
+.banner{border-radius:8px;padding:10px 14px;margin:12px 0}.banner.fallback{background:#fde2e2;color:#7a1d1d}.banner.stale{background:#fff3cd;color:#6b4e00}
+table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-size:13px}
+ul{margin:4px 0;padding-left:20px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media(max-width:760px){.cols{grid-template-columns:1fr}}
+.feed div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}.err{color:var(--bad);font-size:13px}
+a{color:var(--acc)}
+</style></head><body><main>
+<div class="row"><h1 class="grow">AI Bridge</h1><small id="proj"></small></div>
+<div id="banner"></div>
+<div class="card" id="taskcard"><div class="row"><textarea id="goal" data-keep rows="2" class="grow" placeholder="输入新目标，例如：给 playground 的猜数字游戏加一个难度选项"></textarea></div>
+<div class="row" style="margin-top:8px"><button class="primary" onclick="startRun()">开始</button><button class="danger" id="stopbtn" onclick="stopRun()">停止当前任务</button><span class="err" id="taskerr"></span></div></div>
+<div id="app"></div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const t = (iso) => (iso ? new Date(iso).toLocaleTimeString() : "");
+const sec = (ms) => (ms == null ? "—" : (ms / 1000).toFixed(1) + "s");
+const statusText = { working: "工作中", armed: "待命", waiting: "等待中", idle: "空闲", stale: "可能断网", offline: "失联", "never-joined": "未加入",
+  ready: "待领取", in_progress: "进行中", awaiting_approval: "待审批", approved: "已批准", rejected: "已打回", done: "完成", cancelled: "已取消",
+  active: "进行中", stopped: "已停止" };
+const st = (s) => '<span class="chip s-' + s + '">' + (statusText[s] || s) + "</span>";
+const list = (arr) => (arr && arr.length ? "<ul>" + arr.map((x) => "<li>" + esc(x) + "</li>").join("") + "</ul>" : "");
+
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function startRun() {
+  $("#taskerr").textContent = "";
+  try { await post("/api/runs", { goal: $("#goal").value }); $("#goal").value = ""; } catch (e) { $("#taskerr").textContent = e.message; }
+  load();
+}
+async function stopRun() {
+  if (!confirm("停止当前任务？进行中的阶段会被取消。")) return;
+  try { await post("/api/runs/stop"); } catch (e) { $("#taskerr").textContent = e.message; }
+  load();
+}
+async function decide(id, action) {
+  const note = (document.getElementById("note-" + id) || {}).value || "";
+  try { await post("/api/attempts/" + id + "/decide", { action, note }); } catch (e) { alert(e.message); }
+  load();
+}
+async function sendMsg(agent) {
+  const el = document.getElementById("msg-" + agent);
+  if (!el.value.trim()) return;
+  try { await post("/api/mail", { to: agent, text: el.value }); el.value = ""; } catch (e) { alert(e.message); }
+  load();
+}
+async function answer(id) {
+  const a = document.getElementById("ans-" + id).value;
+  try { await post("/api/questions/" + id + "/answer", { answer: a }); } catch (e) { alert(e.message); }
+  load();
+}
+
+function handoffBody(h) {
+  const d = h.data;
+  return '<div><b>' + esc(d.summary) + "</b></div>" +
+    (d.verdict ? "<div>审查结论：" + (d.verdict === "approve" ? '<b class="s-working">通过</b>' : '<b class="s-rejected">打回</b>') + "</div>" : "") +
+    (d.review_comments && d.review_comments.length ? "<div class=mute>审查意见</div>" + list(d.review_comments) : "") +
+    (d.done.length ? "<div class=mute>已完成</div>" + list(d.done) : "") +
+    (d.todo.length ? "<div class=mute>待办</div>" + list(d.todo) : "") +
+    (d.decisions.length ? "<div class=mute>关键决策</div>" + list(d.decisions.map((x) => x.what + " —— " + x.why)) : "") +
+    (d.files_changed.length ? "<div class=mute>改动文件</div>" + list(d.files_changed) : "") +
+    (d.notes_for_next ? "<div class=mute>给下一位</div><div>" + esc(d.notes_for_next) + "</div>" : "") +
+    "<div><small>" + (h.commit_sha ? '提交 <a href="/api/commits/' + h.commit_sha + '" target="_blank">' + h.commit_sha.slice(0, 8) + "</a>" : esc(h.commit_error || "")) + "</small></div>";
+}
+
+function render(s) {
+  $("#proj").innerHTML = esc(s.project) + " · " + (s.git.repo ? "git" + (s.git.dirty ? "（" + s.git.dirty + " 个未提交改动）" : "") : '<span class="err">不是 git 仓库</span>');
+  $("#banner").innerHTML = s.attention ? '<div class="banner ' + s.attention.kind + '">' + esc(s.attention.message) + "</div>" : "";
+  const open = s.run && (s.run.status === "active" || s.run.status === "awaiting_approval");
+  $("#stopbtn").style.display = open ? "" : "none";
+
+  let h = "";
+  if (s.run) {
+    const latest = {};
+    for (const a of s.attempts) latest[a.stage_id] = a;
+    h += '<div class="card"><div class="row"><h2 class="grow">任务 #' + s.run.id + "：" + esc(s.run.goal) + "</h2>" + st(s.run.status) + '</div><div class="pipe">' +
+      s.pipeline.map((p) => {
+        const a = latest[p.id];
+        const live = s.live && s.live.stage_id === p.id;
+        const n = s.attempts.filter((x) => x.stage_id === p.id).length;
+        return '<div class="stage' + (live ? " live" : "") + '"><b>' + esc(p.id) + "</b> <small>" + esc(p.role) + "</small><br>" +
+          esc(p.agent) + (p.gate ? ' <small title="完成后需你审批">🔒</small>' : "") + "<br>" + (a ? st(a.status) : '<span class="chip">未开始</span>') +
+          (n > 1 ? " <small>第 " + n + " 轮</small>" : "") + "</div>";
+      }).join("") + "</div></div>";
+
+    if (s.live && s.live.status === "awaiting_approval") {
+      const a = s.live, ho = s.handoffs.find((x) => x.id === a.handoff_id), p = s.pipeline.find((x) => x.id === a.stage_id);
+      const target = p.on_reject || p.id, rejectFirst = ho && ho.data.verdict === "reject";
+      const bApprove = '<button class="' + (rejectFirst ? "" : "primary") + '" onclick="decide(' + a.id + ',\\'approve\\')">' + (rejectFirst ? "仍然通过" : "批准，继续") + "</button>";
+      const bReject = '<button class="' + (rejectFirst ? "primary" : "danger") + '" onclick="decide(' + a.id + ',\\'reject\\')">' + (rejectFirst ? "确认打回" : "打回") + "到「" + esc(target) + "」</button>";
+      h += '<div class="card" style="border-color:var(--warn)"><h2>待你审批：' + esc(a.stage_id) + "（" + esc(a.agent) + "）</h2>" + (ho ? handoffBody(ho) : "") +
+        '<textarea id="note-' + a.id + '" data-keep rows="2" style="margin-top:10px" placeholder="备注（可选）：批准时会带给下一阶段，打回时作为修改意见"></textarea>' +
+        '<div class="row" style="margin-top:8px">' + (rejectFirst ? bReject + bApprove : bApprove + bReject) + "</div></div>";
+    }
+  }
+
+  for (const q of s.questions)
+    h += '<div class="card" style="border-color:var(--acc)"><h2>' + esc(q.agent) + " 问你</h2><div>" + esc(q.question) +
+      '</div><div class="row" style="margin-top:8px"><input id="ans-' + q.id + '" data-keep class="grow" placeholder="你的回答"><button class="primary" onclick="answer(' + q.id + ')">回答</button></div></div>';
+
+  const bell = { "claude-socket": "Claude 消息注入", "codex-hook": "Codex Stop hook", poll: "轮询" };
+  h += '<div class="card"><h2>成员</h2><table><tr><th>agent</th><th>负责</th><th>状态</th><th>门铃</th><th>信件</th><th>上次活动</th><th>发消息</th></tr>' +
+    s.agents.map((a) => "<tr><td>" + esc(a.id) + "</td><td><small>" + esc(a.roles.join("、")) + "</small></td><td>" + st(a.status) + "</td><td><small>" +
+      esc(bell[a.doorbell] || a.doorbell) + (a.doorbell === "poll" ? "" : a.doorbellArmed ? ' <span class="s-working">●</span>' : ' <span class="mute">○</span>') +
+      (a.doorbellError ? '<br><span class="err">' + esc(a.doorbellError) + "</span>" : "") + "</small></td><td><small>" +
+      (a.pendingMail ? "未取 " + a.pendingMail : "") + (a.stuckMail ? ' <span class="err">送不到 ' + a.stuckMail + "</span>" : "") +
+      (a.unackedMail ? " 待确认 " + a.unackedMail : "") + (!a.pendingMail && !a.unackedMail ? "—" : "") +
+      '</small></td><td><span data-ago="' + esc(a.lastSeenAt || "") + '">—</span></td>' +
+      '<td><div class="row" style="flex-wrap:nowrap"><input id="msg-' + esc(a.id) + '" data-keep placeholder="给 ' + esc(a.id) + ' 发消息" style="min-width:140px">' +
+      '<button onclick="sendMsg(\\'' + esc(a.id) + '\\')">发送</button></div></td></tr>').join("") + "</table></div>";
+
+  const mailStatus = { queued: "待投递", rung: "已按门铃", fetched: "已取走", acked: "已确认", stuck: "送不到", void: "作废" };
+  if (s.mail.length)
+    h += '<div class="card"><h2>信件</h2><div class="feed">' + s.mail.map((m) =>
+      "<div><small>" + t(m.created_at) + "</small> " + esc(m.from) + " → " + esc(m.to) + "：" + esc(m.subject) +
+      ' <span class="chip m-' + m.status + '">' + (mailStatus[m.status] || m.status) + (m.ring_count > 1 ? " ×" + m.ring_count : "") + "</span>" +
+      (m.overdue ? ' <span class="err">确认超时</span>' : "") + "</div>").join("") + "</div></div>";
+
+  h += '<div class="cols"><div class="card"><h2>交接记录</h2>' +
+    (s.handoffs.length ? s.handoffs.slice().reverse().map((x) => '<div style="padding:8px 0;border-bottom:1px solid var(--line)"><small>' + t(x.created_at) + " · " + esc(x.agent) + " / " + esc(x.stage_id) + "</small>" + handoffBody(x) + "</div>").join("") : '<small>还没有交接</small>') +
+    '</div><div><div class="card"><h2>动态</h2><div class="feed">' +
+    (s.events.length ? s.events.map((e) => "<div><small>" + t(e.created_at) + "</small> " + esc(e.text) + "</div>").join("") : "<small>暂无</small>") +
+    '</div></div><div class="card"><h2>共享笔记</h2><div class="feed">' +
+    (s.notes.length ? s.notes.map((n) => "<div><span class=chip>" + esc(n.topic) + "</span> " + esc(n.text) + " <small>— " + esc(n.agent) + "</small></div>").join("") : "<small>暂无</small>") +
+    '</div></div><div class="card"><h2>最近任务</h2><div class="feed">' +
+    s.recentRuns.map((r) => "<div>#" + r.id + " " + st(r.status) + " " + esc(r.goal) + "</div>").join("") +
+    "</div></div></div></div>";
+
+  // Re-render without losing what the user is typing.
+  const kept = {};
+  document.querySelectorAll("#app [data-keep]").forEach((el) => (kept[el.id] = el.value));
+  const focused = document.activeElement && document.activeElement.id;
+  $("#app").innerHTML = h;
+  for (const [id, v] of Object.entries(kept)) { const el = document.getElementById(id); if (el) el.value = v; }
+  if (focused) { const el = document.getElementById(focused); if (el) el.focus(); }
+  tickAgo();
+}
+
+function tickAgo() {
+  document.querySelectorAll("[data-ago]").forEach((el) => {
+    const ts = el.getAttribute("data-ago");
+    el.textContent = ts ? sec(Date.now() - Date.parse(ts)) + " 前" : "—";
+  });
+}
+
+// Only rebuild the DOM when the state actually changed, so buttons aren't replaced under the cursor.
+let loading = false, lastKey = "";
+async function load() {
+  if (loading) return; loading = true;
+  try {
+    const s = await (await fetch("/api/state")).json();
+    const key = JSON.stringify(s);
+    if (key !== lastKey) { lastKey = key; render(s); }
+  } finally { loading = false; }
+}
+load();
+new EventSource("/api/stream").onmessage = load;
+setInterval(load, 5000);
+setInterval(tickAgo, 1000);
+</script></body></html>`;

@@ -1,0 +1,34 @@
+# 复制到目标项目根目录并改名为 bridge.config.yaml。没有这个文件时桥使用下面这套默认配置。
+# agents: 参与协作的身份（agent_id）。doorbell: auto（Claude 经本地转接程序自动登记消息注入）/ codex-hook / poll。
+# pipeline: 按顺序执行的阶段。gate: true 表示该阶段完成后停下等你在面板上批准；on_reject: 你确认打回时退回到哪个阶段（默认重做本阶段）。
+agents:
+  claude: { product: claude-code, doorbell: auto }
+  codex:  { product: codex, doorbell: codex-hook }
+pipeline:
+  - id: plan
+    role: 规划/架构
+    agent: claude
+    gate: true
+    instructions: 把目标细化成可执行的设计说明和验收标准，写进项目文件，交接单里列出关键决策。
+  - id: implement
+    role: 编码
+    agent: codex
+    instructions: 按规划阶段的设计说明实现，并自己跑一遍验收标准。
+  - id: review
+    role: 审查
+    agent: claude
+    gate: true
+    on_reject: implement
+    instructions: 对照验收标准逐项实测。交接单的 verdict 填 approve 或 reject，review_comments 写具体问题。
+wait:
+  poll_seconds: 50            # wait_for_mail 单次最长阻塞秒数，需小于客户端工具超时
+  stale_after_seconds: 90     # 超过这么久没动静 → 面板显示“可能断网”
+  offline_after_seconds: 300  # 超过这么久没动静 → 判定失联
+mail:
+  ring_retry_seconds: 120     # 按了门铃但没来取信 → 隔这么久再按
+  max_rings: 3                # 按这么多次仍没反应 → 通知你去叫醒它
+  ack_timeout_seconds: 600    # 取走需要确认的信后这么久没确认 → 标红并通知你
+notify:
+  enabled: true               # Windows 通知
+git:
+  auto_commit: true           # 每次交接自动 git add -A + commit

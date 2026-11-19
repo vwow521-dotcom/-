@@ -1,0 +1,157 @@
+// MCP tool surface. One McpServer per client session; all share the Engine.
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import type { Engine } from "./engine.js";
+
+const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
+
+export function buildServer(engine: Engine): McpServer {
+  const server = new McpServer({ name: "ai-bridge", version: "0.2.0" });
+  const ids = engine.agentIds().join(", ");
+  const agentId = z.string().describe(`你的身份，可选：${ids}`);
+
+  server.registerTool(
+    "join",
+    {
+      title: "加入协作桥",
+      description: "声明你在协作桥中的身份，获取你负责的阶段和工作协议。会话开始时调用一次。",
+      inputSchema: {
+        agent_id: agentId,
+        takeover: z.boolean().optional().describe("该身份已被另一个会话占用、且你确定自己就是它时，设为 true 接管"),
+        _doorbell: z.string().optional().describe("由协作桥的本地转接程序自动填写，不要手动设置"),
+      },
+    },
+    async ({ agent_id, takeover, _doorbell }, extra) => text(engine.join(agent_id, extra.sessionId, takeover, _doorbell)),
+  );
+
+  server.registerTool(
+    "fetch_inbox",
+    {
+      title: "取信",
+      description: "取走你所有未读的信（任务、用户消息、问题答复、其他成员的来信）。被「[协作桥]」消息叫醒后调用。",
+      inputSchema: { agent_id: agentId },
+    },
+    async ({ agent_id }, extra) => text(engine.fetchInbox(agent_id, extra.sessionId)),
+  );
+
+  server.registerTool(
+    "ack",
+    {
+      title: "确认信件",
+      description: "处理完 ack_required 的信后调用，告诉用户你已经收到并处理。task 信不用手动确认，submit_handoff 会自动确认。",
+      inputSchema: { agent_id: agentId, mail_ids: z.array(z.string()).min(1) },
+    },
+    async ({ agent_id, mail_ids }, extra) => text(engine.ack(agent_id, extra.sessionId, mail_ids)),
+  );
+
+  server.registerTool(
+    "wait_for_mail",
+    {
+      title: "等信（无门铃时使用）",
+      description: `仅在 join 返回 doorbell 为 poll 时使用：阻塞最长约 ${engine.cfg.wait.poll_seconds} 秒等新信。有信时直接返回信件；返回 keep_waiting 时必须立即再次调用。`,
+      inputSchema: { agent_id: agentId },
+    },
+    async ({ agent_id }, extra) => {
+      const token = extra._meta?.progressToken;
+      const onTick =
+        token !== undefined
+          ? (n: number) =>
+              extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: n, message: "等信中…" } }).catch(() => {})
+          : undefined;
+      return text(await engine.waitForMail(agent_id, extra.sessionId, extra.signal, onTick));
+    },
+  );
+
+  server.registerTool(
+    "send_mail",
+    {
+      title: "给其他成员写信",
+      description: "给协作桥里的其他成员写信（提问、提醒、协调）。对方会被门铃叫醒。",
+      inputSchema: {
+        agent_id: agentId,
+        to: z.string().describe(`收件人，可选：${ids}`),
+        subject: z.string().describe("一句话主题"),
+        body: z.string(),
+        ack_required: z.boolean().optional().describe("需要对方确认时设为 true"),
+        mail_id: z.string().optional().describe("可选：自定义信件 id，重发同一 id 不会重复投递"),
+      },
+    },
+    async ({ agent_id, to, subject, body, ack_required, mail_id }, extra) =>
+      text(engine.sendFromAgent(agent_id, extra.sessionId, to, subject, body, mail_id, ack_required)),
+  );
+
+  server.registerTool(
+    "get_context",
+    {
+      title: "获取任务上下文",
+      description: "获取当前任务的目标、各阶段状态、全部交接单和共享笔记。需要比任务信更多的背景时调用。",
+      inputSchema: { agent_id: agentId },
+    },
+    async ({ agent_id }, extra) => text(engine.getContext(agent_id, extra.sessionId)),
+  );
+
+  server.registerTool(
+    "report_progress",
+    {
+      title: "汇报进度",
+      description: "工作中途汇报一句进度，用户会在面板上实时看到。不会改变阶段状态。",
+      inputSchema: { agent_id: agentId, text: z.string().describe("一句话进度") },
+    },
+    async ({ agent_id, text: t }, extra) => text(engine.reportProgress(agent_id, extra.sessionId, t)),
+  );
+
+  server.registerTool(
+    "post_note",
+    {
+      title: "记录共享笔记",
+      description: "记录值得所有成员共享的约定、决策或坑（跨任务保留），替代散落的 md 交接文件。",
+      inputSchema: { agent_id: agentId, topic: z.string().describe("主题，如 架构、约定、坑"), text: z.string() },
+    },
+    async ({ agent_id, topic, text: t }, extra) => text(engine.postNote(agent_id, extra.sessionId, topic, t)),
+  );
+
+  server.registerTool(
+    "read_notes",
+    {
+      title: "读取共享笔记",
+      description: "读取共享笔记，可按主题过滤。",
+      inputSchema: { agent_id: agentId, topic: z.string().optional() },
+    },
+    async ({ agent_id, topic }, extra) => text(engine.readNotes(agent_id, extra.sessionId, topic)),
+  );
+
+  server.registerTool(
+    "ask_human",
+    {
+      title: "向用户提问",
+      description: "遇到必须由用户决定的问题时调用。问题会出现在用户的面板上并通知用户；立即返回，用户的答复之后以信件送达。",
+      inputSchema: { agent_id: agentId, question: z.string() },
+    },
+    async ({ agent_id, question }, extra) => text(engine.askHuman(agent_id, extra.sessionId, question)),
+  );
+
+  server.registerTool(
+    "submit_handoff",
+    {
+      title: "提交交接单",
+      description: "完成本阶段后调用，提交结构化交接单。桥会自动 git 提交、确认任务信并推进流水线。",
+      inputSchema: {
+        agent_id: agentId,
+        summary: z.string().describe("一句话：本阶段做了什么"),
+        done: z.array(z.string()).default([]).describe("已完成事项"),
+        todo: z.array(z.string()).default([]).describe("留给后续阶段的事项"),
+        decisions: z
+          .array(z.object({ what: z.string(), why: z.string() }))
+          .default([])
+          .describe("关键决策及理由"),
+        files_changed: z.array(z.string()).default([]).describe("改动的文件路径"),
+        notes_for_next: z.string().default("").describe("给下一个角色的注意事项"),
+        verdict: z.enum(["approve", "reject"]).optional().describe("仅审查阶段：approve 通过 / reject 打回"),
+        review_comments: z.array(z.string()).optional().describe("仅审查阶段：具体问题列表"),
+      },
+    },
+    async ({ agent_id, ...data }, extra) => text(await engine.submitHandoff(agent_id, extra.sessionId, data)),
+  );
+
+  return server;
+}

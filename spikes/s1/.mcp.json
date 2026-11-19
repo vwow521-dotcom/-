@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "s1-doorbell": {
+      "command": "node",
+      "args": ["E:/Interaction-ai/spikes/s1/doorbell.mjs"]
+    }
+  }
+}

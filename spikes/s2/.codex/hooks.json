@@ -1,0 +1,28 @@
+{
+  "description": "S2 spike: Stop hook waits for bridge mail and continues the turn when mail arrives; UserPromptSubmit releases it when the user speaks.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node E:/Interaction-ai/spikes/s2/stop-hook.mjs",
+            "timeout": 300,
+            "statusMessage": "等待协作桥来信…"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node E:/Interaction-ai/spikes/s2/user-prompt-hook.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

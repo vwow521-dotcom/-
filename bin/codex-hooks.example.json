@@ -1,0 +1,17 @@
+{
+  "description": "AI 协作桥：Codex 门铃。只对 join 过协作桥的对话生效，其他对话立即放行。复制到目标项目的 .codex/hooks.json（或 %USERPROFILE%\\.codex\\hooks.json），并在 Codex 里信任它。",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node E:/Interaction-ai/bin/codex-stop-hook.mjs",
+            "timeout": 660,
+            "statusMessage": "等待协作桥来信…"
+          }
+        ]
+      }
+    ]
+  }
+}
