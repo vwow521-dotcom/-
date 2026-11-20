@@ -12,6 +12,9 @@ interface AgentPresence {
   canRecover?: boolean; // set only when the bound MCP session closes
   boundAt?: number;
   lastSeenAt?: number; // last tool call from the bound session
+  // Counts the same activity as lastSeenAt. A doorbell check compares counts, not timestamps: the call that
+  // caused a ring and a new call after it can share a millisecond.
+  callSeq: number;
   doorbellError?: string;
   lastRingAt?: number;
   lastRingKind?: DoorbellKind;
@@ -41,11 +44,19 @@ export class Presence {
     },
   ) {
     for (const id of Object.keys(ctx.cfg.agents))
-      this.agents.set(id, { id, waiting: false, waitCalls: 0, maxGapMs: 0, totalGapMs: 0, gapCount: 0 });
+      this.agents.set(id, { id, callSeq: 0, waiting: false, waitCalls: 0, maxGapMs: 0, totalGapMs: 0, gapCount: 0 });
   }
 
   get(agent: string) {
     return this.agents.get(agent);
+  }
+
+  /** Record a tool call (or a wait_for_mail return) from the agent's bound session. */
+  touch(agent: string) {
+    const p = this.agents.get(agent);
+    if (!p) return;
+    p.lastSeenAt = Date.now();
+    p.callSeq++;
   }
 
   markReturned(agent: string) {
@@ -92,7 +103,7 @@ export class Presence {
     if (!p.sessionId) return `你还没有以 ${agent} 身份 join，请先调用 join。`;
     if (p.sessionId !== sessionId)
       return `身份 ${agent} 已被另一个会话占用。请确认你的身份（可选：${this.agentIds().join(", ")}）；如果确实是你，用 join(agent_id, takeover=true) 接管。`;
-    p.lastSeenAt = Date.now();
+    this.touch(agent);
     return null;
   }
 
@@ -103,7 +114,7 @@ export class Presence {
     }
     p.sessionId = sessionId;
     p.canRecover = false;
-    p.lastSeenAt = Date.now();
+    this.touch(p.id);
   }
 
   setSessionDoorbell(sessionId: string, hint: string | undefined) {

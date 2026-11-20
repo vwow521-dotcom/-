@@ -123,7 +123,7 @@ export class Meetings {
     if (!parts.includes(fac)) parts.push(fac);
     const m = this.ctx.store.createMeeting(t, parts, fac);
     this.ctx.log("meeting_start", { meeting: m.id, topic: t, participants: parts, facilitator: fac });
-    this.ctx.event(null, null, "meeting", `会议 #${m.id} 开始：${t}（${parts.join("、")}，定稿：${fac}）`);
+    this.ctx.event(null, null, "meeting", `会议 #${m.id} 开始：${t}（${parts.join("、")}，定稿：${fac}）`, m.id);
     this.sendRoundMail(m);
     return { ok: true, meeting_id: m.id };
   }
@@ -190,18 +190,18 @@ export class Meetings {
     this.ctx.store.setMailStatus([this.meetingMailId(m.id, m.round, agent)], "acked");
     this.presence.markReturned(agent);
     this.ctx.log("meeting_turn", { meeting: m.id, round: m.round, kind: m.round_kind, agent, tasks: planned?.length ?? 0 });
-    this.ctx.event(null, agent, "meeting", `${agent} 在会议 #${m.id} 第 ${m.round} 轮${KIND_LABEL[m.round_kind]}发言`);
+    this.ctx.event(null, agent, "meeting", `${agent} 在会议 #${m.id} 第 ${m.round} 轮${KIND_LABEL[m.round_kind]}发言`, m.id);
 
     const spoken = new Set([...turns.filter((t) => t.round === m.round).map((t) => t.agent), agent]);
     const complete = this.expectedSpeakers(m).every((a) => spoken.has(a));
     if (complete) {
       if (m.round_kind === "final") {
         this.ctx.store.updateMeeting(m.id, { status: "awaiting_approval" });
-        this.ctx.event(null, null, "meeting", `会议 #${m.id} 定稿完成，等你批准`);
+        this.ctx.event(null, null, "meeting", `会议 #${m.id} 定稿完成，等你批准`, m.id);
         this.ctx.notifyHuman("协作桥：会议定稿等你批准", `${m.topic}（${planned?.length ?? 0} 个任务）`);
       } else {
         this.ctx.store.updateMeeting(m.id, { status: "review" });
-        this.ctx.event(null, null, "meeting", `会议 #${m.id} 第 ${m.round} 轮发言已齐，等你决定：再互评一轮或定稿`);
+        this.ctx.event(null, null, "meeting", `会议 #${m.id} 第 ${m.round} 轮发言已齐，等你决定：再互评一轮或定稿`, m.id);
         this.ctx.notifyHuman("协作桥：会议发言已齐", `${m.topic} 第 ${m.round} 轮`);
       }
     }
@@ -221,7 +221,7 @@ export class Meetings {
     this.ctx.store.updateMeeting(m.id, { status: "collecting", round: m.round + 1, round_kind: kind, round_note: note.trim() || null });
     const next = this.ctx.store.meeting(m.id)!;
     this.ctx.log("meeting_round", { meeting: m.id, round: next.round, kind });
-    this.ctx.event(null, null, "meeting", `会议 #${m.id} 进入第 ${next.round} 轮：${KIND_LABEL[kind]}${note.trim() ? "（你的意见：" + note.trim() + "）" : ""}`);
+    this.ctx.event(null, null, "meeting", `会议 #${m.id} 进入第 ${next.round} 轮：${KIND_LABEL[kind]}${note.trim() ? "（你的意见：" + note.trim() + "）" : ""}`, m.id);
     this.sendRoundMail(next);
     return { ok: true, round: next.round };
   }
@@ -232,7 +232,7 @@ export class Meetings {
     this.voidRoundMail(m);
     this.ctx.store.updateMeeting(m.id, { status: "cancelled" });
     this.ctx.log("meeting_cancel", { meeting: m.id });
-    this.ctx.event(null, null, "meeting", `会议 #${m.id} 已取消`);
+    this.ctx.event(null, null, "meeting", `会议 #${m.id} 已取消`, m.id);
     return { ok: true };
   }
 
@@ -243,7 +243,7 @@ export class Meetings {
     const trimmed = note.trim();
     if (action === "reject") {
       this.ctx.store.updateMeeting(m.id, { status: "collecting", round: m.round + 1, round_kind: "final", round_note: trimmed || "用户要求修改定稿。" });
-      this.ctx.event(null, null, "meeting", `你打回了会议 #${m.id} 的定稿${trimmed ? "：" + trimmed : ""}`);
+      this.ctx.event(null, null, "meeting", `你打回了会议 #${m.id} 的定稿${trimmed ? "：" + trimmed : ""}`, m.id);
       this.sendRoundMail(this.ctx.store.meeting(m.id)!);
       return { ok: true };
     }
@@ -277,7 +277,7 @@ export class Meetings {
       });
     this.ctx.store.updateMeeting(m.id, { status: "done", run_id: run.id, doc_path: rel });
     this.ctx.log("meeting_approved", { meeting: m.id, run: run.id, doc: rel, commit, tasks: final.tasks.length });
-    this.ctx.event(run.id, null, "meeting", `你批准了会议 #${m.id} 的定稿：纪要 ${rel}，${final.tasks.length} 个任务开始分派`);
+    this.ctx.event(run.id, null, "meeting", `你批准了会议 #${m.id} 的定稿：纪要 ${rel}，${final.tasks.length} 个任务开始分派`, m.id);
     this.ctx.event(run.id, null, "run", `任务 #${run.id} 开始：${m.topic}`);
     this.scheduler.schedule(run.id);
     return { ok: true, run_id: run.id, doc_path: rel, commit, commit_note };
@@ -286,7 +286,8 @@ export class Meetings {
   private minutesPath(m: Meeting) {
     const day = new Date().toISOString().slice(0, 10);
     const topic = m.topic.replace(/[\p{Ps}\p{Pe}\p{Pi}\p{Pf}"'<>＂＇\u2460-\u249b\u24ea-\u24ff\u2776-\u2793]/gu, "");
-    const head = topic.split(/[\p{P}|*\u0000-\u001f]/u, 1)[0].trim().replace(/\s+/g, "-");
+    // A dot between digits is part of a version number ("0.9.0"), not the end of the short title.
+    const head = topic.split(/(?<!\d)\.|\.(?!\d)|[^\P{P}.]|[|*\u0000-\u001f]/u, 1)[0].trim().replace(/\s+/g, "-");
     const slug = [...head].slice(0, 24).join("").replace(/-+$/, "");
     const dir = this.ctx.cfg.meetings.dir.replace(/\\/g, "/").replace(/\/+$/, "");
     const stem = `${dir}/${day}-m${m.id}${slug ? "-" + slug : ""}`;

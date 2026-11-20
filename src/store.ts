@@ -216,6 +216,7 @@ export interface AgentEndpoint {
 export interface BridgeEvent {
   id: number;
   run_id: number | null;
+  meeting_id: number | null;
   agent: string | null;
   kind: string;
   text: string;
@@ -239,27 +240,25 @@ export interface FolderRow {
 const now = () => new Date().toISOString();
 type Arg = string | number | null;
 
-// Older meeting events have no run_id. Their text contains the meeting number followed by a space.
-const meetingEvent = (id: string) => `kind = 'meeting' AND instr(text, '会议 #' || ${id} || ' ') > 0`;
-const folderList = `WITH run_activity AS (
-  SELECT run_id, MAX(at) AS updated_at FROM (
-    SELECT run_id, created_at AS at FROM events WHERE run_id IS NOT NULL
-    UNION ALL SELECT run_id, created_at FROM handoffs
-    UNION ALL SELECT run_id, MAX(assigned_at, COALESCE(started_at, ''), COALESCE(ended_at, '')) FROM attempts
-  ) GROUP BY run_id
-), folders AS (
+// Meeting events written before events.meeting_id existed: the templates the bridge has always used, with
+// the meeting number right after "会议 #". Anchored at the start so a topic or note naming another meeting
+// doesn't count.
+const LEGACY_MEETING_EVENT = /^(?:你打回了|你批准了|\S+ 在)?会议 #([1-9]\d*) /;
+// The latest activity of one run, each part read through a per-run index.
+const runActivity = (run: string) => `MAX(COALESCE(${run}.created_at, ''), COALESCE(${run}.ended_at, ''),
+    COALESCE((SELECT MAX(created_at) FROM events WHERE run_id = ${run}.id), ''),
+    COALESCE((SELECT MAX(created_at) FROM handoffs WHERE run_id = ${run}.id), ''),
+    COALESCE((SELECT MAX(MAX(assigned_at, COALESCE(started_at, ''), COALESCE(ended_at, ''))) FROM attempts WHERE run_id = ${run}.id), ''))`;
+const folderList = `WITH folders AS (
   SELECT 'm' || m.id AS id, 'meeting' AS kind, m.id AS number, m.topic AS title,
     COALESCE(r.status, m.status) AS status, r.id AS run_id, m.round AS rounds,
-    MAX(m.created_at, COALESCE(m.ended_at, ''), COALESCE(r.ended_at, ''),
-      COALESCE(r.created_at, ''), COALESCE(a.updated_at, ''),
-      COALESCE((SELECT MAX(created_at) FROM events WHERE ${meetingEvent("m.id")}), ''),
+    MAX(m.created_at, COALESCE(m.ended_at, ''), ${runActivity("r")},
+      COALESCE((SELECT MAX(created_at) FROM events WHERE meeting_id = m.id), ''),
       COALESCE((SELECT MAX(created_at) FROM meeting_turns WHERE meeting_id = m.id), '')) AS updated_at
   FROM meetings m LEFT JOIN runs r ON r.id = m.run_id
-    LEFT JOIN run_activity a ON a.run_id = r.id
   UNION ALL
-  SELECT 'r' || r.id, 'run', r.id, r.goal, r.status, r.id, 0,
-    MAX(r.created_at, COALESCE(r.ended_at, ''), COALESCE(a.updated_at, ''))
-  FROM runs r LEFT JOIN run_activity a ON a.run_id = r.id
+  SELECT 'r' || r.id, 'run', r.id, r.goal, r.status, r.id, 0, ${runActivity("r")}
+  FROM runs r
   WHERE r.meeting_id IS NULL AND NOT EXISTS (SELECT 1 FROM meetings WHERE run_id = r.id)
 )
 SELECT f.*,
@@ -336,10 +335,38 @@ export class Store {
     if (!cols("handoffs").includes("scope_notes")) this.db.exec("ALTER TABLE handoffs ADD COLUMN scope_notes TEXT");
     if (!cols("attempts").includes("task_id")) this.db.exec("ALTER TABLE attempts ADD COLUMN task_id INTEGER");
     if (!cols("runs").includes("meeting_id")) this.db.exec("ALTER TABLE runs ADD COLUMN meeting_id INTEGER");
+    if (!cols("events").includes("meeting_id")) {
+      this.db.exec("ALTER TABLE events ADD COLUMN meeting_id INTEGER");
+      this.backfillMeetingEvents();
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS events_run ON events (run_id, created_at);
+      CREATE INDEX IF NOT EXISTS events_meeting ON events (meeting_id, created_at);
+      CREATE INDEX IF NOT EXISTS handoffs_run ON handoffs (run_id);
+      CREATE INDEX IF NOT EXISTS attempts_run ON attempts (run_id);
+      CREATE INDEX IF NOT EXISTS meeting_turns_meeting ON meeting_turns (meeting_id);
+    `);
     // Pre-0.5 Codex thread registrations (codex_threads) → the latest one per agent as its codex-thread endpoint.
     this.db.exec(`INSERT OR IGNORE INTO agent_endpoints (agent, kind, address, registered_at)
       SELECT agent, 'codex-thread', session_id, COALESCE(last_parked_at, registered_at) FROM codex_threads c
       WHERE COALESCE(last_parked_at, registered_at) = (SELECT MAX(COALESCE(last_parked_at, registered_at)) FROM codex_threads WHERE agent = c.agent)`);
+  }
+
+  /** Once, when events gains meeting_id: link older meeting events by their text. Unrecognised rows stay NULL. */
+  private backfillMeetingEvents() {
+    const meetings = new Set(this.all<{ id: number }>("SELECT id FROM meetings").map((m) => m.id));
+    const update = this.db.prepare("UPDATE events SET meeting_id = ? WHERE id = ?");
+    this.db.exec("BEGIN");
+    try {
+      for (const e of this.all<{ id: number; text: string }>("SELECT id, text FROM events WHERE kind = 'meeting'")) {
+        const id = Number(LEGACY_MEETING_EVENT.exec(e.text)?.[1]);
+        if (meetings.has(id)) update.run(id, e.id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Pre-M2c runs have no task rows: give each one task (T1) running `stages`, and point its attempts at it. */
@@ -684,14 +711,13 @@ export class Store {
   }
 
   // ---- event feed (progress reports + system events), shown on the panel
-  addEvent(run_id: number | null, agent: string | null, kind: string, text: string) {
-    this.insert("INSERT INTO events (run_id, agent, kind, text, created_at) VALUES (?, ?, ?, ?, ?)", run_id, agent, kind, text, now());
+  addEvent(run_id: number | null, agent: string | null, kind: string, text: string, meeting_id: number | null = null) {
+    this.insert("INSERT INTO events (run_id, agent, kind, text, meeting_id, created_at) VALUES (?, ?, ?, ?, ?, ?)", run_id, agent, kind, text, meeting_id, now());
   }
   recentEvents(limit = 50) {
     return this.all<BridgeEvent>("SELECT * FROM events ORDER BY id DESC LIMIT ?", limit);
   }
   folderEvents(runId: number | null, meetingId: number | null, limit = 40) {
-    return this.all<BridgeEvent>(`SELECT * FROM events WHERE run_id = ? OR (${meetingEvent("?")})
-      ORDER BY id DESC LIMIT ?`, runId, meetingId, limit);
+    return this.all<BridgeEvent>("SELECT * FROM events WHERE run_id = ? OR meeting_id = ? ORDER BY id DESC LIMIT ?", runId, meetingId, limit);
   }
 }

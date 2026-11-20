@@ -156,6 +156,7 @@ export class Postman {
     this.ctx.store.setMailStatus(ids, "rung");
     const p = this.presence.get(agent)!;
     const rangAt = Date.now();
+    const seqAtRing = p.callSeq;
     const deferred = bell.verify && bell.waitsForTurn && TURN_EXTRA_MS > 0 && rangAt - (p.lastSeenAt ?? 0) <= RECENT_TURN_MS;
     const graceMs = WAKE_GRACE_MS + (deferred ? TURN_EXTRA_MS : 0);
     if (deferred) for (const id of ids) this.deferredWakes.set(id, ids);
@@ -180,7 +181,7 @@ export class Postman {
           if (o.note) this.ctx.log("doorbell_note", { agent, via: bell.kind, note: o.note });
           if (verification) setTimeout(() => {
             this.releaseDeferredWake(ids);
-            if (!verification.disconnected) this.checkWake(agent, bell, ids, rangAt, graceMs, nowTried, measured);
+            if (!verification.disconnected) this.checkWake(agent, bell, ids, seqAtRing, graceMs, nowTried, measured);
           }, graceMs).unref();
           return;
         }
@@ -222,9 +223,9 @@ export class Postman {
    * already busy on a bridge task reads its mail when it gets to it. Otherwise try the next doorbell, and
    * when none is left, ask the human.
    */
-  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, graceMs: number, tried: ReadonlySet<DoorbellKind>, measured: boolean) {
+  private checkWake(agent: string, bell: Doorbell, ids: string[], seqAtRing: number, graceMs: number, tried: ReadonlySet<DoorbellKind>, measured: boolean) {
     const statuses = ids.map((id) => this.ctx.store.mail(id)?.status);
-    if ((this.presence.get(agent)?.lastSeenAt ?? 0) > rangAt || this.isBusy(agent) || statuses.some((s) => s === "fetched" || s === "acked")) {
+    if ((this.presence.get(agent)?.callSeq ?? 0) > seqAtRing || this.isBusy(agent) || statuses.some((s) => s === "fetched" || s === "acked")) {
       if (measured) this.doorbells.recordResult(agent, bell, "confirmed");
       return;
     }
@@ -406,7 +407,7 @@ export class Postman {
     if (this.mailWakers.get(agent) === mine) this.mailWakers.delete(agent);
     if (tick) clearInterval(tick);
     p.waiting = false;
-    p.lastSeenAt = Date.now();
+    this.presence.touch(agent);
     this.ctx.onChange();
     if (outcome === "cancelled") {
       this.ctx.log("wait_cancelled", { agent, heldMs: Date.now() - started });

@@ -1187,6 +1187,145 @@ notify: { enabled: false }
     "grace-window fetch is confirmed and exposes the real stage index");
   await timing.close();
   await other.close();
+
+  // ===== H: wake confirmation by call sequence, on a frozen clock =====
+  console.log("— H: same-millisecond wake confirmation");
+  {
+    process.env.BRIDGE_WAKE_GRACE_SECONDS = "0.05";
+    const { Postman } = await import("../src/engine/postman.js");
+    const { Presence } = await import("../src/engine/presence.js");
+    delete process.env.BRIDGE_WAKE_GRACE_SECONDS;
+    const realNow = Date.now;
+    const frozen = realNow();
+    const sameMs = async (label: string, callAfterRing: boolean) => {
+      const mails = new Map<string, { id: string; status: string; to_agent: string; subject: string }>();
+      const results: string[] = [];
+      const stub = <T extends object>(own: T) => new Proxy(own, { get: (t: any, k) => (k in t ? t[k] : () => undefined) });
+      const store = stub({
+        mailByStatus: (agent: string, statuses: string[]) => [...mails.values()].filter((m) => m.to_agent === agent && statuses.includes(m.status)),
+        setMailStatus: (ids: string[], status: string) => { for (const id of ids) mails.get(id)!.status = status; },
+        mail: (id: string) => mails.get(id),
+      });
+      const ctx = stub({ cfg: { agents: { q: {} }, wait: { poll_seconds: 1 }, mail: {} }, store, onChange() {}, log() {}, event() {}, notifyHuman() {} });
+      const bell = { kind: "fake", label: "测试门铃", verify: true, waitsForTurn: false, ring: async () => ({ ok: true }) };
+      const doorbells = stub({
+        pick: (_agent: string, tried: Set<string>) => (tried.has("fake") ? undefined : bell),
+        recordRing() {},
+        recordResult: (_agent: string, _bell: unknown, result: string) => { results.push(result); },
+      });
+      const presence = new Presence(ctx as any, doorbells as any, { wakeWaiter() {}, resendLiveTask() {} });
+      const postman = new Postman(ctx as any, presence, doorbells as any, { task: () => null, meeting: () => null, chat: () => null });
+      Date.now = () => frozen;
+      try {
+        presence.touch("q"); // the handoff call that queues the next stage for the same agent
+        mails.set(label, { id: label, status: "queued", to_agent: "q", subject: label });
+        postman.kick("q");
+        await sleep(0);
+        if (callAfterRing) presence.touch("q"); // a new call in the very same millisecond
+        const p = presence.get("q")!;
+        const sameInstant = p.lastSeenAt === p.lastRingAt;
+        await sleep(200);
+        return { result: results[0], sameInstant, status: mails.get(label)!.status };
+      } finally {
+        Date.now = realNow;
+      }
+    };
+    const before = await sameMs("before", false);
+    check(before.sameInstant && before.result === "timeout" && before.status === "rung",
+      "a call in the ring's millisecond that came before the ring does not confirm the wake");
+    const after = await sameMs("after", true);
+    check(after.sameInstant && after.result === "confirmed",
+      "a call in the ring's millisecond that came after the ring confirms the wake");
+  }
+
+  // ===== I: minutes names through approval, and meeting events linked by id =====
+  console.log("— I: minutes file names and events.meeting_id");
+  await stopDaemon();
+  const minutesProject = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-minutes-"));
+  const mgit = (...args: string[]) => execFileSync("git", ["-C", minutesProject, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  mgit("init", "-q");
+  mgit("config", "user.name", "bridge-smoke");
+  mgit("config", "user.email", "bridge-smoke@example.invalid");
+  fs.writeFileSync(path.join(minutesProject, "bridge.config.yaml"), `agents: { mbot: { doorbell: poll } }
+pipeline:
+  - { id: implement, role: 编码, agent: mbot }
+notify: { enabled: false }
+`);
+  mgit("add", "-A");
+  mgit("commit", "-qm", "init");
+  await startDaemon(minutesProject);
+  const mbot = await connect("minutes-mbot");
+  await call(mbot, "join", { agent_id: "mbot" });
+  const meet = async (topic: string) => {
+    const started = await api("/api/meetings", { topic, participants: ["mbot"], facilitator: "mbot" });
+    const id = started.json.meeting_id;
+    await call(mbot, "fetch_inbox", { agent_id: "mbot" });
+    await call(mbot, "submit_meeting_turn", { agent_id: "mbot", meeting_id: id, content: "提案" });
+    await api(`/api/meetings/${id}/next`, { action: "finalize", note: "" });
+    await call(mbot, "fetch_inbox", { agent_id: "mbot" });
+    await call(mbot, "submit_meeting_turn", { agent_id: "mbot", meeting_id: id, content: "定稿", tasks: [{ id: "T1", title: "收尾", owner: "mbot" }] });
+    const approved = await api(`/api/meetings/${id}/decide`, { action: "approve", note: "" });
+    await api("/api/runs/stop", {});
+    return { id, ...approved.json };
+  };
+  const day = new Date().toISOString().slice(0, 10);
+  const committed = (sha: string) => mgit("-c", "core.quotepath=false", "show", "--name-only", "--format=", sha).trim().split("\n");
+  const blank = await meet("「（）」：①②——");
+  check(blank.doc_path === `doc/meetings/${day}-m${blank.id}.md` && committed(blank.commit).includes(blank.doc_path),
+    "a topic with nothing left after cleaning gives minutes with no short title");
+  const wide = "𠀀".repeat(30);
+  const long = await meet("①“" + wide + "”，其余说明");
+  check(long.doc_path === `doc/meetings/${day}-m${long.id}-${"𠀀".repeat(24)}.md` && committed(long.commit).includes(long.doc_path),
+    "the short title keeps 24 characters even outside the BMP, without circled numbers or quotes");
+  const versioned = await meet("收尾 0.9.0 的问题：细节");
+  check(versioned.doc_path === `doc/meetings/${day}-m${versioned.id}-收尾-0.9.0-的问题.md`, "a version number's dots do not end the short title");
+  const nextId = versioned.id + 1;
+  const taken = [`doc/meetings/${day}-m${nextId}-重名.md`, `doc/meetings/${day}-m${nextId}-重名-2.md`];
+  for (const [i, f] of taken.entries()) fs.writeFileSync(path.join(minutesProject, f), "已有内容 " + i);
+  const clash = await meet("重名");
+  check(clash.id === nextId && clash.doc_path === `doc/meetings/${day}-m${nextId}-重名-3.md` && committed(clash.commit).includes(clash.doc_path) &&
+    taken.every((f, i) => fs.readFileSync(path.join(minutesProject, f), "utf8") === "已有内容 " + i),
+    "minutes skip both taken names, land on -3 and leave the existing files alone");
+
+  const folderEventsOf = async (id: string) => (await api(`/api/folders/${id}`)).json.events.map((e: any) => e.text);
+  const linked = await folderEventsOf("m" + blank.id);
+  check(linked.filter((t: string) => t.startsWith(`你批准了会议 #${blank.id} `)).length === 1 && linked.some((t: string) => t.startsWith("任务 #")) &&
+    linked.some((t: string) => t.startsWith(`会议 #${blank.id} 开始`)), "a meeting folder lists its own events once, together with its run's events");
+  const newFolders = (await api("/api/folders?limit=100")).json.folders.map((f: any) => f.id);
+  const newEvents = await Promise.all(newFolders.map(folderEventsOf));
+  await mbot.close();
+  await stopDaemon();
+
+  // Turn the database back into one from before events.meeting_id, plus legacy rows for meetings #1–#10.
+  const legacy = new DatabaseSync(path.join(minutesProject, ".bridge", "bridge.db"));
+  legacy.exec("DROP INDEX events_meeting; ALTER TABLE events DROP COLUMN meeting_id");
+  const addMeeting = legacy.prepare(`INSERT INTO meetings (id, topic, participants, facilitator, status, round, round_kind, created_at)
+    VALUES (?, ?, '["mbot"]', 'mbot', 'cancelled', 1, 'proposal', '2020-01-01T00:00:00.000Z')`);
+  for (let id = nextId + 1; id <= 10; id++) addMeeting.run(id, "旧会议 " + id);
+  const addEvent = legacy.prepare("INSERT INTO events (run_id, agent, kind, text, created_at) VALUES (NULL, ?, 'meeting', ?, ?)");
+  const tie = "2031-01-01T00:00:00.000Z";
+  addEvent.run(null, "会议 #10 开始：议题十（mbot，定稿：mbot）", "2030-01-01T00:00:00.000Z");
+  addEvent.run("mbot", "mbot 在会议 #10 第 1 轮提案发言", tie);
+  addEvent.run(null, "会议 #9 进入第 2 轮：互评（你的意见：参考会议 #1 的结论）", tie);
+  addEvent.run(null, "自由文本提到会议 #8 但不是模板", "2032-01-01T00:00:00.000Z");
+  legacy.close();
+  await startDaemon(minutesProject);
+  const reopenedFolders = (await api("/api/folders?limit=100")).json.folders;
+  check(reopenedFolders[0].id === "m9" && reopenedFolders[1].id === "m10" && reopenedFolders[0].updated_at === tie && reopenedFolders[1].updated_at === tie,
+    "backfilled meeting events order folders, the same time broken by folder id, and free text naming #8 is not linked");
+  check(JSON.stringify((await Promise.all(newFolders.map(folderEventsOf)))) === JSON.stringify(newEvents) &&
+    JSON.stringify(reopenedFolders.filter((f: any) => newFolders.includes(f.id)).map((f: any) => f.id)) === JSON.stringify(newFolders),
+    "after reopening, the existing meetings keep their folder order and events");
+  check((await folderEventsOf("m10")).length === 2 && (await folderEventsOf("m1")).every((t: string) => !t.includes("参考会议 #1")) &&
+    (await folderEventsOf("m9")).length === 1, "legacy rows link to the meeting their template names: #10 is not #1, and a note naming #1 stays with #9");
+  const paged: string[] = [];
+  let cursor = "";
+  do {
+    const page = (await api("/api/folders?limit=1" + (cursor ? "&before=" + encodeURIComponent(cursor) : ""))).json;
+    paged.push(...page.folders.map((f: any) => f.id));
+    cursor = page.next_before;
+  } while (cursor);
+  check(JSON.stringify(paged) === JSON.stringify(reopenedFolders.map((f: any) => f.id)), "one-folder pages walk the whole list once across the tied timestamps");
 } catch (e) {
   console.error(e);
   failed = true;

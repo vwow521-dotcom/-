@@ -24,8 +24,9 @@ export class EngineContext {
     console.log(`[${line.t.slice(11, 19)}] ${event}`, Object.keys(data).length ? JSON.stringify(data) : "");
   }
 
-  event(run_id: number | null, agent: string | null, kind: string, text: string) {
-    this.store.addEvent(run_id, agent, kind, text);
+  /** Record a panel event. A meeting's events name it by id so its folder finds them without reading the text. */
+  event(run_id: number | null, agent: string | null, kind: string, text: string, meeting_id: number | null = null) {
+    this.store.addEvent(run_id, agent, kind, text, meeting_id);
     this.onChange();
   }
 
