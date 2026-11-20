@@ -51,7 +51,7 @@ svg { flex: none; }
 /* ================================================================ atoms */
 .ib { width: 32px; height: 32px; border-radius: 50%; display: inline-grid; place-items: center; color: var(--ink-2); position: relative; }
 .ib:hover { color: var(--ink); background: var(--hover); }
-.ib[aria-pressed="true"] { color: var(--run-text); }
+.ib[aria-pressed="true"], .ib[aria-current="page"] { color: var(--run-text); }
 .ib[aria-pressed="true"]::after { content: ""; position: absolute; bottom: 0; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
 .ib .badge { position: absolute; top: -2px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: var(--need); color: var(--need-ink); font-size: 10px; font-weight: 800; display: grid; place-items: center; }
 .chip { padding: 6px 14px; border-radius: 99px; background: var(--panel-2); font-weight: 600; font-size: 13px; color: var(--ink); white-space: nowrap; }
@@ -286,6 +286,15 @@ svg { flex: none; }
 .composer .in { display: flex; gap: 8px; }
 .composer textarea { flex: 1; resize: none; min-height: 40px; padding: 9px 14px; border-radius: 20px; border: 0; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line); }
 .composer .hint { font-size: 11px; color: var(--ink-3); }
+/* chat page */
+.main:has(.chat-page) { overflow: hidden; }
+.chat-page { height: 100%; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.chat-head { display: flex; align-items: baseline; gap: 12px; padding: 20px 24px 12px; border-bottom: 1px solid var(--line); }
+.chat-head h1 { font-size: 22px; letter-spacing: -.01em; }
+.chat-scroll { overflow: auto; padding: 16px 24px; }
+.chat-scroll .msgs { max-width: 820px; }
+.chat-page .composer { padding: 12px 24px 16px; }
+.chat-page .composer .in, .chat-page .composer .targets, .chat-page .composer .hint { max-width: 820px; }
 /* queue */
 .q-h { font-size: 15px; font-weight: 700; margin: 8px 0 8px; }
 .q-i { display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 4px 12px; padding: 8px; border-radius: 6px; align-items: center; }
@@ -384,7 +393,7 @@ svg { flex: none; }
   </div>
   <div class="c">
     <button class="home-btn" data-act="page" data-page="home" aria-label="主页" title="主页" id="home-btn"></button>
-    <label class="search"><span id="search-ic"></span><span class="sr">搜索</span><input placeholder="找会议、任务、文件或成员"><span class="sep"></span><button class="ib" data-act="page" data-page="office" aria-label="办公室" title="办公室：看所有成员在做什么" id="office-btn"></button></label>
+    <label class="search"><span id="search-ic"></span><span class="sr">搜索</span><input placeholder="找会议、任务、文件或成员"><span class="sep"></span><button class="ib" data-act="page" data-page="office" aria-label="办公室" title="办公室：看所有成员在做什么" id="office-btn"></button><button class="ib" data-act="page" data-page="chat" aria-label="聊天" title="聊天" id="chat-btn"></button></label>
   </div>
   <div class="r">
     <button class="pillbtn run sm" title="发起会议或工作流"><span aria-hidden="true">＋</span>发起</button>
@@ -623,13 +632,30 @@ svg { flex: none; }
     return '<div class="tbl"><div class="tr"><span class="no">📄</span><span class="ti"><span class="cv" style="--g:var(--panel-2)"></span><b>doc/meetings/' + f.id + "-纪要.md</b><span>" + (f.group === "done" ? "已提交" : "会议结束后生成") + '</span></span><span></span><span class="tm">' + f.at + "</span></div></div>";
   }
 
+
+  function chatPage() {
+    return '<div class="chat-page"><div class="chat-head"><h1>聊天</h1><span class="muted">总群 · claude、codex 和你</span></div>' +
+      '<div class="chat-scroll">' +
+        '<div class="msgs">' +
+        '<div class="msg">' + acover("human") + '<div class="h"><b>你</b><span>14:20</span></div><div class="b"><span class="mention">@claude</span> <span class="mention">@codex</span> P3 的配色先按预览壳子走，深色模式也要。</div><div class="rc2">claude 已读 · codex 已读</div></div>' +
+        '<div class="msg">' + acover("claude") + '<div class="h"><b>claude</b><span>14:21</span></div><div class="b">收到。我负责 T3 的 token 和深色模式，<span class="mention">@codex</span> 先做 folders 接口。</div><div class="rc2">codex 已读</div></div>' +
+        '<div class="sysline">' + '<span style="width:14px;height:14px;display:inline-flex">' + I.meeting + '</span><span>会议 #4 第 2 轮：等待 codex</span><button data-act="folder" data-id="m4">查看</button></div>' +
+        '<div class="msg">' + acover("codex") + '<div class="h"><b>codex</b><span>14:36</span></div><div class="b">T2 布局做完了，交接里附了 375px 截图说明。</div><div class="rc2">仅你可见</div></div>' +
+        '<div class="sysline need"><span style="width:14px;height:14px;display:inline-flex">' + I.bell + '</span><span>T2 实现交接待你审批</span><button data-act="folder" data-id="m2" data-tab="handoffs">去审批</button></div>' +
+        "</div>" +
+      '</div>' +
+      '<form class="composer" onsubmit="return false"><div class="targets"><button type="button" class="chip" aria-pressed="true">@claude</button><button type="button" class="chip" aria-pressed="false">@codex</button><button type="button" class="chip" aria-pressed="false">@所有人</button></div>' +
+        '<div class="in"><label class="sr" for="say">消息</label><textarea id="say" rows="1" placeholder="说点什么"></textarea><button class="pillbtn run sm" type="button">发送</button></div>' +
+        '<span class="hint">claude 正在做 T3 审查，消息会排队，这一轮结束后送达</span></form>' + "</div>";
+  }
+
   function officePage() {
     return '<div class="hero" style="--tint:color-mix(in srgb,#0b8173 30%,transparent);padding-top:40px"><h1 style="font-size:clamp(28px,3.6vw,48px);font-weight:900;letter-spacing:-.03em">办公室</h1><p class="muted" style="margin-top:6px">每个成员此刻在做什么。点卡片看任务，或直接发消息。</p></div>' +
       '<div class="pad"><div class="desks">' + agents.map((a) => {
         const sc = SCENES[a.st];
         return '<article class="desk st-' + a.st + '"><div class="scene">' + sc[1] + '</div><div class="info"><div class="nm">' + (a.id === "gemini" ? '<span class="who"><span class="av">G</span>gemini</span>' : who(a.id)) +
           '<span class="pill ' + sc[2] + '" style="margin-left:auto">' + sc[0] + '</span></div><div class="ev">' + a.ev + " · " + a.since + "</div>" +
-          '<div class="acts"><button class="pillbtn ghost sm">看任务</button><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button>' + (a.st === "unknown" ? '<button class="pillbtn ghost sm">查看异常</button>' : "") + "</div></div></article>";
+          '<div class="acts"><button class="pillbtn ghost sm">看任务</button><button class="pillbtn ghost sm" data-act="page" data-page="chat">发消息</button>' + (a.st === "unknown" ? '<button class="pillbtn ghost sm">查看异常</button>' : "") + "</div></div></article>";
       }).join("") +
       '<article class="desk st-meeting"><div class="scene">' + SCENES.meeting[1] + '</div><div class="info"><div class="nm"><b>会议桌</b><span class="pill run" style="margin-left:auto">会议 #4 · 第 2 轮</span></div><div class="ev">M3：ACP 后台成员怎么接入。等待 codex 互评。</div><div class="acts"><button class="pillbtn ghost sm" data-act="folder" data-id="m4">进入会议</button></div></div></article>' +
       "</div>" +
@@ -640,20 +666,6 @@ svg { flex: none; }
   function renderRight() {
     const r = S.right === "none" ? "detail" : S.right;
     const close = '<button class="ib" data-act="right" data-r="none" aria-label="关闭侧栏" title="关闭">' + I.close + "</button>";
-    if (r === "chat") {
-      $("#right").innerHTML = '<div class="rp-h"><h2>聊天</h2>' + close + "</div>" +
-        '<div class="rp-b"><div class="msgs">' +
-        '<div class="msg">' + acover("human") + '<div class="h"><b>你</b><span>14:20</span></div><div class="b"><span class="mention">@claude</span> <span class="mention">@codex</span> P3 的配色先按预览壳子走，深色模式也要。</div><div class="rc2">claude 已读 · codex 已读</div></div>' +
-        '<div class="msg">' + acover("claude") + '<div class="h"><b>claude</b><span>14:21</span></div><div class="b">收到。我负责 T3 的 token 和深色模式，<span class="mention">@codex</span> 先做 folders 接口。</div><div class="rc2">codex 已读</div></div>' +
-        '<div class="sysline">' + '<span style="width:14px;height:14px;display:inline-flex">' + I.meeting + '</span><span>会议 #4 第 2 轮：等待 codex</span><button data-act="folder" data-id="m4">查看</button></div>' +
-        '<div class="msg">' + acover("codex") + '<div class="h"><b>codex</b><span>14:36</span></div><div class="b">T2 布局做完了，交接里附了 375px 截图说明。</div><div class="rc2">仅你可见</div></div>' +
-        '<div class="sysline need"><span style="width:14px;height:14px;display:inline-flex">' + I.bell + '</span><span>T2 实现交接待你审批</span><button data-act="folder" data-id="m2" data-tab="handoffs">去审批</button></div>' +
-        "</div></div>" +
-        '<form class="composer" onsubmit="return false"><div class="targets"><button type="button" class="chip" aria-pressed="true">@claude</button><button type="button" class="chip" aria-pressed="false">@codex</button><button type="button" class="chip" aria-pressed="false">@所有人</button></div>' +
-        '<div class="in"><label class="sr" for="say">消息</label><textarea id="say" rows="1" placeholder="说点什么"></textarea><button class="pillbtn run sm" type="button">发送</button></div>' +
-        '<span class="hint">claude 正在做 T3 审查，消息会排队，这一轮结束后送达</span></form>';
-      return;
-    }
     if (r === "queue") {
       $("#right").innerHTML = '<div class="rp-h"><h2>待你处理</h2>' + close + "</div>" +
         '<div class="rp-b"><h3 class="q-h">正在进行</h3>' +
@@ -671,8 +683,8 @@ svg { flex: none; }
     $("#right").innerHTML = '<div class="rp-h"><h2>' + f.title + "</h2>" + close + "</div>" +
       '<div class="rp-b"><p class="np-s">' + kindName(f) + " #" + f.id.slice(1) + " · " + f.status + "</p>" +
       '<section class="rc"><header><h3>成员</h3><button class="link" data-act="page" data-page="office">办公室</button></header>' +
-      '<div class="mem">' + acover("claude") + '<b>claude</b><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button><small><span class="pill run">审查中</span>T3 · attempt #18</small></div>' +
-      '<div class="mem">' + acover("codex") + '<b>codex</b><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button><small><span class="pill need">等你审批</span>T2 · 3 分钟前</small></div></section>' +
+      '<div class="mem">' + acover("claude") + '<b>claude</b><button class="pillbtn ghost sm" data-act="page" data-page="chat">发消息</button><small><span class="pill run">审查中</span>T3 · attempt #18</small></div>' +
+      '<div class="mem">' + acover("codex") + '<b>codex</b><button class="pillbtn ghost sm" data-act="page" data-page="chat">发消息</button><small><span class="pill need">等你审批</span>T2 · 3 分钟前</small></div></section>' +
       '<section class="rc"><header><h3>文件租约</h3><span class="muted">3</span></header>' +
       '<div class="lease"><code>panel/js/views/meeting.js</code><span class="muted">codex · T2</span></div>' +
       '<div class="lease"><code>panel/app.css</code><span class="muted">claude · T3</span></div>' +
@@ -693,18 +705,18 @@ svg { flex: none; }
     $("#player").innerHTML =
       '<div class="np">' + cover(f) + '<div class="bd"><div class="t">' + NOW.task + " " + NOW.stage + '</div><div class="s"><button data-act="page" data-page="office">' + NOW.agent + '</button> · <button data-act="folder" data-id="' + f.id + '">' + kindName(f) + " #" + f.id.slice(1) + "</button></div></div></div>" +
       '<div class="ctr"><div class="btns">' +
-        '<button class="ib" data-act="right" data-r="chat" title="给 ' + NOW.agent + ' 发消息" aria-label="给 ' + NOW.agent + ' 发消息">' + I.chat + "</button>" +
+        '<button class="ib" data-act="page" data-page="chat" title="给 ' + NOW.agent + ' 发消息" aria-label="给 ' + NOW.agent + ' 发消息">' + I.chat + "</button>" +
         '<button class="play" data-act="folder" data-id="' + f.id + '" data-tab="tasks" title="查看这一步" aria-label="查看这一步">' + I.jump + "</button>" +
         '<button class="ib" data-act="right" data-r="queue" title="接下来" aria-label="接下来">' + I.queue + "</button>" +
         '<button class="ib" title="停止工作流（会确认）" aria-label="停止工作流">' + I.stop + "</button>" +
       "</div>" +
       '<div class="prog"><span>attempt #' + NOW.attempt + '</span><div class="segs" role="progressbar" aria-label="阶段：实现已完成，审查进行中" aria-valuetext="第 2 步，共 3 步">' + segs + "</div><span>" + NOW.since + "</span></div></div>" +
-      '<div class="rt">' + t("detail", I.detail, "详情") + t("chat", I.chat, "聊天") + t("queue", I.queue, "待你处理", needCount) + "</div>";
+      '<div class="rt">' + t("detail", I.detail, "详情") + t("queue", I.queue, "待你处理", needCount) + "</div>";
   }
 
   function renderMnav() {
     const items = [["home", I.home, "主页"], ["lib", I.lib, "工作区"], ["chat", I.chat.replace(/16/g, "22"), "聊天"], ["queue", I.queue.replace(/16/g, "22"), "待处理"]];
-    const cur = S.m === "home" ? "home" : S.m === "lib" ? "lib" : S.right;
+    const cur = S.m === "lib" ? "lib" : S.m === "right" ? S.right : S.page === "chat" ? "chat" : "home";
     $("#mnav").innerHTML = items.map(([k, ic, n]) => '<button data-act="m" data-k="' + k + '" aria-current="' + (cur === k ? "page" : "false") + '">' + ic + "<span>" + n + "</span>" + (k === "queue" ? '<span class="badge">' + needCount + "</span>" : "") + "</button>").join("");
   }
 
@@ -712,8 +724,10 @@ svg { flex: none; }
     $("#shell").dataset.right = S.right;
     $("#shell").dataset.m = S.m;
     $("#home-btn").setAttribute("aria-current", S.page === "home" ? "page" : "false");
+  $("#office-btn").setAttribute("aria-current", S.page === "office" ? "page" : "false");
+  $("#chat-btn").setAttribute("aria-current", S.page === "chat" ? "page" : "false");
     renderLib();
-    $("#main").innerHTML = S.page === "folder" ? folderPage() : S.page === "office" ? officePage() : home();
+    $("#main").innerHTML = S.page === "folder" ? folderPage() : S.page === "office" ? officePage() : S.page === "chat" ? chatPage() : home();
     renderRight();
     renderPlayer();
     renderMnav();
@@ -722,6 +736,7 @@ svg { flex: none; }
   // ================================================================ events
   $("#home-btn").innerHTML = I.home;
   $("#office-btn").innerHTML = I.office;
+  $("#chat-btn").innerHTML = I.chat.replace(/width="16" height="16"/, 'width="20" height="20"');
   $("#search-ic").innerHTML = I.search;
   $("#search-ic2").innerHTML = I.search;
 
@@ -742,6 +757,7 @@ svg { flex: none; }
     }
     else if (a === "m") {
       const k = b.dataset.k;
+      if (k === "chat") { nav({ page: "chat" }); return; }
       if (k === "home" || k === "lib") S.m = k; else { S.right = k; S.m = "right"; }
       renderAll();
     }
