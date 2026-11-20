@@ -18,7 +18,7 @@ function heading(f, detail, ids, active) {
   if (f.status === "done") step = phases.length;
   const { counts } = f;
   return `<div class="fhead" style="--tint:${coverTint(f)[0]}">${cover(f)}<div class="tx"><span class="type">${folderLabel(f)}</span>
-    <h1 title="${esc(f.title)}">${esc(f.title)}</h1><div class="meta">${f.members.map((id) => who(id, ids)).join("")}
+    <h1 title="${esc(f.title)}"${[...f.title].length > 28 ? ' class="long"' : ""}>${esc(f.title)}</h1><div class="meta">${f.members.map((id) => who(id, ids)).join("")}
     <span class="sep"></span><span>${f.kind === "meeting" ? counts.rounds + " 轮 · " : ""}${counts.tasks} 个任务 · ${counts.handoffs} 条交接</span>
     <span class="sep"></span><span>${esc(since(f.updated_at))}</span></div>
     <div class="phase-line" aria-label="阶段">${phases.map((p, i) => `<span class="${i < step ? "done" : i === step && !isClosed(f) ? "now" : ""}">${esc(p)}</span>`).join("")}</div></div></div>`;

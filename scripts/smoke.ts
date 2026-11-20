@@ -343,6 +343,11 @@ try {
   const views = panelHtml.match(/<section\b[^>]*\bid="view-(?:home|folder|chat|office)"[^>]*>/g) ?? [];
   check(views.length === 4 && views.every((view) => /\s+hidden(?:\s|>)/.test(view)),
     "all four views start hidden so a direct link mounts only its own view");
+  // The chat view always sits (hidden) inside main, so a bare `.main:has(.chat-page)` locked scrolling on every page.
+  const panelCss = await cssAsset.text();
+  check(/\.main:has\(>\s*#view-chat:not\(\[hidden\]\)\)\s*\{\s*overflow:\s*hidden/.test(panelCss) &&
+    !/\.main:has\(\.chat-page\)/.test(panelCss),
+    "main stops scrolling only while the chat view is shown");
   check(oldPanel.ok && (await oldPanel.text()).includes("/panel/v1/room.js") && oldScript.ok && oldStyle.ok, "meeting-room fallback still served at /v1");
   check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
   const model = await import(new URL("../panel/js/model.js", import.meta.url).href);
