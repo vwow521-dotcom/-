@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Bridge 面板预览</title>
+<style>
+/* ================================================================ tokens */
+:root {
+  color-scheme: dark;
+  --bg: #050506; --panel: #141519; --panel-2: #1e1f24; --hover: #24252b; --active: #2c2d34; --line: #2a2b31;
+  --ink: #f2f3f5; --ink-2: #b4b7bf; --ink-3: #8d919b;
+  --need: #f5a524; --need-ink: #1d1300; --need-text: #f5b14a; --need-soft: rgba(245,165,36,.15);
+  --run: #7aa2ff; --run-ink: #0d1424; --run-text: #8fb0ff; --run-soft: rgba(122,162,255,.15);
+  --done-text: #a3abb8; --done-soft: rgba(154,163,178,.15);
+  --ok: #57d48a; --ok-soft: rgba(87,212,138,.15); --bad: #f47b70; --bad-soft: rgba(244,123,112,.15);
+  --m-claude: #a98bf5; --m-codex: #33cbb6; --m-human: #a3adbd; --m-unknown: #7d838e; --av-ink: #111318;
+  --promo: linear-gradient(120deg, #5b3a05 0%, #2b1d06 70%);
+  --shadow: 0 8px 24px rgba(0,0,0,.5);
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e4e2dc; --panel: #ffffff; --panel-2: #f3f2ee; --hover: #eeece7; --active: #e5e2db; --line: #e3e0d8;
+  --ink: #1b1d22; --ink-2: #4a4f5a; --ink-3: #5f6570;
+  --need: #e8900c; --need-ink: #1d1300; --need-text: #9a4604; --need-soft: #fcefd6;
+  --run: #2b59c3; --run-ink: #ffffff; --run-text: #2b59c3; --run-soft: #e4ebfa;
+  --done-text: #565f6e; --done-soft: #e9ebee;
+  --ok: #157a3d; --ok-soft: #dff2e6; --bad: #b42318; --bad-soft: #fbe5e3;
+  --m-claude: #7c4ddb; --m-codex: #0b8173; --m-human: #475467; --m-unknown: #6b717c; --av-ink: #ffffff;
+  --promo: linear-gradient(120deg, #fbe0b0 0%, #fdf3e0 70%);
+  --shadow: 0 8px 24px rgba(27,29,34,.18);
+}
+
+/* ================================================================ base */
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); display: grid; grid-template-rows: 64px minmax(0,1fr) 84px; overflow: hidden; }
+h1,h2,h3,p,ul,ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; padding: 0; }
+:focus-visible { outline: 2px solid var(--run); outline-offset: 2px; border-radius: 6px; }
+code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .85em; color: var(--ink-3); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.muted { color: var(--ink-3); }
+svg { flex: none; }
+
+/* ================================================================ atoms */
+.ib { width: 32px; height: 32px; border-radius: 50%; display: inline-grid; place-items: center; color: var(--ink-2); position: relative; }
+.ib:hover { color: var(--ink); background: var(--hover); }
+.ib[aria-pressed="true"] { color: var(--run-text); }
+.ib[aria-pressed="true"]::after { content: ""; position: absolute; bottom: 0; width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.ib .badge { position: absolute; top: -2px; right: -4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: var(--need); color: var(--need-ink); font-size: 10px; font-weight: 800; display: grid; place-items: center; }
+.chip { padding: 6px 14px; border-radius: 99px; background: var(--panel-2); font-weight: 600; font-size: 13px; color: var(--ink); white-space: nowrap; }
+.chip:hover { background: var(--active); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+.pillbtn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 99px; font-weight: 700; white-space: nowrap; }
+.pillbtn.need { background: var(--need); color: var(--need-ink); }
+.pillbtn.run { background: var(--run); color: var(--run-ink); }
+.pillbtn.ghost { box-shadow: inset 0 0 0 1px var(--ink-3); color: var(--ink); }
+.pillbtn.ghost:hover { box-shadow: inset 0 0 0 1px var(--ink); }
+.pillbtn.danger { box-shadow: inset 0 0 0 1px var(--bad); color: var(--bad); }
+.pillbtn.sm { padding: 5px 12px; font-size: 13px; }
+.link { color: var(--ink-3); font-weight: 700; font-size: 13px; }
+.link:hover { color: var(--ink); text-decoration: underline; }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.need { background: var(--need-soft); color: var(--need-text); }
+.pill.run { background: var(--run-soft); color: var(--run-text); }
+.pill.done { background: var(--done-soft); color: var(--done-text); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.av { --c: var(--m-unknown); width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 800; color: var(--av-ink); background: var(--c); flex: none; }
+.av.claude { --c: var(--m-claude); } .av.codex { --c: var(--m-codex); } .av.human { --c: var(--m-human); }
+.who { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+
+/* cover: square for folders, round for members */
+.cv { container-type: inline-size; width: 48px; height: 48px; border-radius: 4px; display: grid; place-items: center; background: var(--g, var(--panel-2)); flex: none; overflow: hidden; }
+.cv svg { width: 42%; height: 42%; color: rgba(255,255,255,.92); }
+.cv.round { border-radius: 50%; }
+.cv b { font-size: 42cqw; color: var(--av-ink); font-weight: 800; }
+.cv.fill { width: 100%; height: auto; aspect-ratio: 1; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.3); }
+.cv.fill.round { border-radius: 50%; }
+
+/* ================================================================ top bar */
+.top { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; gap: 12px; padding: 0 16px; }
+.top .l, .top .r { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.top .r { justify-self: end; }
+.brand { display: flex; align-items: baseline; gap: 8px; margin-right: 8px; min-width: 0; }
+.brand b { font-size: 15px; white-space: nowrap; }
+.brand span { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top .c { display: flex; align-items: center; gap: 8px; }
+.home-btn { width: 48px; height: 48px; border-radius: 50%; background: var(--panel-2); display: grid; place-items: center; color: var(--ink-2); }
+.home-btn:hover { transform: scale(1.04); color: var(--ink); }
+.home-btn[aria-current="page"] { color: var(--ink); }
+.search { display: flex; align-items: center; gap: 10px; width: min(460px, 40vw); height: 48px; padding: 0 6px 0 14px; border-radius: 99px; background: var(--panel-2); color: var(--ink-3); }
+.search:focus-within { box-shadow: inset 0 0 0 2px var(--ink); }
+.search input { flex: 1; min-width: 0; border: 0; background: none; outline: none; color: var(--ink); }
+.search input::placeholder { color: var(--ink-3); }
+.search .sep { width: 1px; height: 24px; background: var(--ink-3); opacity: .5; }
+.preview-tag { font-size: 11px; font-weight: 700; color: var(--need-text); background: var(--need-soft); padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+
+/* ================================================================ shell */
+.shell { display: grid; grid-template-columns: 300px minmax(0,1fr) 340px; gap: 8px; padding: 0 8px; min-height: 0; }
+.shell[data-right="none"] { grid-template-columns: 300px minmax(0,1fr); }
+.shell[data-right="none"] .right { display: none; }
+.panel { background: var(--panel); border-radius: 8px; min-height: 0; overflow: hidden; }
+
+/* ================================================================ library */
+.lib { display: grid; grid-template-rows: auto auto minmax(0,1fr); }
+.lib-h { display: flex; align-items: center; gap: 8px; padding: 16px 16px 8px; }
+.lib-h h2 { font-size: 16px; margin-right: auto; display: flex; align-items: center; gap: 10px; color: var(--ink-2); }
+.lib-tools { padding: 4px 16px 4px; display: grid; gap: 10px; }
+.lib-tools .chips { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; }
+.lib-tools .row { display: flex; align-items: center; justify-content: space-between; color: var(--ink-3); font-size: 13px; }
+.lib-list { overflow: auto; padding: 4px 8px 8px; }
+.li { width: 100%; display: grid; grid-template-columns: 48px minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 8px; border-radius: 6px; text-align: left; }
+.li:hover { background: var(--hover); }
+.li[aria-current="true"] { background: var(--active); }
+.li .bd { min-width: 0; display: grid; gap: 2px; }
+.li .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.li .t.playing { color: var(--run-text); }
+.li .s { font-size: 13px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+.li .s .pin { color: var(--need-text); }
+.li .n { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--need); color: var(--need-ink); font-size: 11px; font-weight: 800; display: grid; place-items: center; }
+.li .eq { color: var(--run-text); }
+
+/* ================================================================ main */
+.main { overflow: auto; position: relative; }
+.pad { padding: 0 24px 32px; }
+.hero { padding: 16px 24px 24px; background: linear-gradient(180deg, var(--tint, transparent) 0%, transparent 100%); }
+.chips-row { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+.sc { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.sc-i { position: relative; display: grid; grid-template-columns: 56px minmax(0,1fr) auto; align-items: center; gap: 12px; height: 56px; padding-right: 10px; border-radius: 4px; overflow: hidden; background: color-mix(in srgb, var(--ink) 8%, transparent); text-align: left; font-weight: 700; }
+.sc-i:hover { background: color-mix(in srgb, var(--ink) 14%, transparent); }
+.sc-i .cv { width: 56px; height: 56px; border-radius: 0; }
+.sc-i .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sc-i .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--need); }
+.sc-i .go { width: 32px; height: 32px; border-radius: 50%; background: var(--run); color: var(--run-ink); display: grid; place-items: center; box-shadow: var(--shadow); opacity: 0; transition: opacity .15s; }
+.sc-i:hover .go, .sc-i:focus-visible .go { opacity: 1; }
+.sc-i:hover .dot { display: none; }
+.sec { margin-top: 28px; }
+.sec-h { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+.sec-h h2 { font-size: 22px; letter-spacing: -.01em; }
+.sec-h small { display: block; font-size: 13px; color: var(--ink-3); font-weight: 400; margin-bottom: 2px; }
+.cards { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(160px, 184px); gap: 8px; overflow-x: auto; margin: 0 -12px; padding: 0 12px 4px; scrollbar-width: thin; }
+.card { padding: 12px; border-radius: 8px; text-align: left; display: grid; gap: 8px; align-content: start; position: relative; }
+.card:hover { background: var(--hover); }
+.card .t { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 4px; }
+.card .s { font-size: 13px; color: var(--ink-3); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card .go { position: absolute; right: 20px; top: calc(100% - 140px); width: 44px; height: 44px; border-radius: 50%; background: var(--run); color: var(--run-ink); display: grid; place-items: center; box-shadow: var(--shadow); opacity: 0; transform: translateY(6px); transition: opacity .15s, transform .15s; }
+.card:hover .go { opacity: 1; transform: none; }
+.card.need-card .go { background: var(--need); color: var(--need-ink); }
+
+/* "need you" promo card — the 开始使用-style banner */
+.promo { border-radius: 8px; background: var(--promo); padding: 22px 24px; display: grid; gap: 10px; position: relative; overflow: hidden; }
+.promo::after { content: ""; position: absolute; right: -60px; bottom: -80px; width: 260px; height: 260px; border-radius: 50%; background: var(--need); opacity: .12; }
+.promo .kick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
+.promo h3 { font-size: clamp(20px, 2.2vw, 28px); letter-spacing: -.02em; line-height: 1.25; }
+.promo ul { display: grid; gap: 4px; color: var(--ink-2); }
+.promo ul li::before { content: "· "; }
+.promo .acts { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 6px; position: relative; z-index: 1; }
+.promo input, .field { flex: 1 1 220px; min-width: 0; height: 36px; padding: 0 14px; border-radius: 99px; border: 0; background: color-mix(in srgb, var(--panel) 70%, transparent); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.ask { margin-top: 8px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 12px 16px; border-radius: 8px; background: var(--panel-2); }
+.ask .q { font-weight: 600; }
+.ask .q small { display: block; color: var(--ink-3); font-weight: 400; font-size: 12px; }
+
+/* ================================================================ folder page */
+.fhead { display: flex; align-items: flex-end; gap: 24px; padding: 48px 24px 24px; background: linear-gradient(180deg, var(--tint) 0%, color-mix(in srgb, var(--tint) 35%, var(--panel)) 100%); }
+.fhead .cv { width: 200px; height: 200px; border-radius: 6px; box-shadow: 0 8px 40px rgba(0,0,0,.45); }
+.fhead .tx { min-width: 0; display: grid; gap: 8px; }
+.fhead .type { font-size: 13px; font-weight: 700; color: #fff; display: flex; gap: 8px; align-items: center; }
+.fhead h1 { font-size: clamp(30px, 4.2vw, 64px); font-weight: 900; letter-spacing: -.03em; line-height: 1.05; color: #fff; }
+.fhead .meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: rgba(255,255,255,.85); }
+.fhead .meta .who { color: #fff; }
+.fhead .meta .sep::before { content: "•"; margin: 0 2px; }
+.phase-line { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.phase-line span { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 99px; background: rgba(0,0,0,.28); color: rgba(255,255,255,.75); }
+.phase-line span.done::before { content: "✓ "; }
+.phase-line span.now { background: #fff; color: #111; }
+.fbar { display: flex; align-items: center; gap: 16px; padding: 20px 24px 12px; background: linear-gradient(180deg, color-mix(in srgb, var(--tint) 18%, var(--panel)) 0%, var(--panel) 120px); flex-wrap: wrap; }
+.big { width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center; box-shadow: var(--shadow); }
+.big:hover { transform: scale(1.04); }
+.big.need { background: var(--need); color: var(--need-ink); }
+.big.run { background: var(--run); color: var(--run-ink); }
+.fbar .ctx { font-size: 13px; color: var(--ink-2); }
+.fbar .tabs { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.fbar .tabs .chip .tn { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 99px; background: var(--need); color: var(--need-ink); }
+
+/* track-list table */
+.tbl { margin: 8px 24px 32px; }
+.tr { display: grid; grid-template-columns: 36px minmax(0,1fr) 110px 90px; gap: 12px; align-items: center; padding: 8px 12px; border-radius: 6px; min-height: 56px; }
+.tr:not(.th):hover { background: var(--hover); }
+.tr.th { min-height: 36px; font-size: 13px; color: var(--ink-3); border-bottom: 1px solid var(--line); border-radius: 0; margin-bottom: 8px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tr .no { color: var(--ink-3); text-align: center; font-variant-numeric: tabular-nums; }
+.tr .ti { min-width: 0; display: grid; grid-template-columns: 40px minmax(0,1fr); gap: 0 12px; align-items: center; }
+.tr .ti .cv { width: 40px; height: 40px; grid-row: span 2; }
+.tr .ti b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.tr .ti span { font-size: 13px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr .tm { color: var(--ink-3); font-size: 13px; text-align: right; }
+.tr.gate { background: var(--need-soft); box-shadow: inset 3px 0 0 var(--need); }
+.tr.gate .no { color: var(--need-text); }
+.tr.gate .ti b { color: var(--need-text); }
+.tr .gx { grid-column: 2 / -1; display: grid; gap: 8px; padding: 4px 0 6px; }
+.tr .gx ul { color: var(--ink-2); font-size: 13px; display: grid; gap: 2px; }
+.tr .gx ul li::before { content: "· "; }
+.tr .gx .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+.tbl.tasks .tr { grid-template-columns: 36px minmax(0,1fr) 120px 150px; }
+.tbl .more { margin: 8px 12px; }
+
+/* discussion rounds */
+.rounds { margin: 8px 24px 32px; display: grid; gap: 12px; }
+.rnd { background: var(--panel-2); border-radius: 8px; }
+.rnd > header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; }
+.rnd > header h3 { font-size: 14px; }
+.rnd > header .r { margin-left: auto; color: var(--ink-3); font-size: 13px; }
+.rnd .sum { padding: 0 16px 14px; display: grid; gap: 6px; color: var(--ink-2); }
+.rnd .sum li { display: flex; gap: 8px; align-items: baseline; }
+.speeches { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; padding: 0 16px 16px; }
+.speech { border-radius: 8px; background: var(--panel); padding: 12px 14px; border-top: 3px solid var(--c, var(--m-unknown)); }
+.speech.claude { --c: var(--m-claude); } .speech.codex { --c: var(--m-codex); }
+.speech p { color: var(--ink-2); line-height: 1.6; margin-top: 8px; }
+.speech.waiting { border-top-style: dashed; display: grid; place-items: center; text-align: center; min-height: 120px; color: var(--ink-3); }
+
+/* office */
+.desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.desk { background: var(--panel-2); border-radius: 8px; overflow: hidden; }
+.desk .scene { height: 120px; display: grid; place-items: center; background: var(--sc-bg); }
+.desk .scene svg { width: 88px; height: 88px; color: var(--sc); }
+.desk .info { padding: 12px 14px 14px; display: grid; gap: 6px; }
+.desk .nm { display: flex; align-items: center; gap: 8px; }
+.desk .ev { font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.desk .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.st-working, .st-reviewing { --sc: var(--run-text); --sc-bg: var(--run-soft); }
+.st-meeting  { --sc: var(--m-claude); --sc-bg: var(--hover); }
+.st-awaiting { --sc: var(--need); --sc-bg: var(--need-soft); }
+.st-idle     { --sc: var(--ok); --sc-bg: var(--ok-soft); }
+.st-unreach  { --sc: var(--bad); --sc-bg: var(--bad-soft); }
+.st-unknown, .st-offline { --sc: var(--ink-3); --sc-bg: var(--done-soft); }
+.legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap: 8px; }
+.legend .lg { display: flex; align-items: center; gap: 10px; background: var(--panel-2); border-radius: 8px; padding: 8px 10px; font-size: 12px; }
+.legend .sw { width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; background: var(--sc-bg); }
+.legend svg { width: 28px; height: 28px; color: var(--sc); }
+
+/* ================================================================ right panel */
+.right { display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
+.rp-h { display: flex; align-items: center; gap: 4px; padding: 14px 12px 8px 16px; }
+.rp-h h2 { font-size: 16px; margin-right: auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-b { overflow: auto; padding: 4px 16px 16px; }
+.rp-b > .cv.fill { margin-bottom: 16px; }
+.np-t { display: flex; align-items: center; gap: 10px; }
+.np-t h3 { font-size: 22px; letter-spacing: -.01em; flex: 1; min-width: 0; line-height: 1.25; }
+.np-s { color: var(--ink-3); margin-top: 4px; }
+.rc { background: var(--panel-2); border-radius: 8px; padding: 16px; margin-top: 16px; }
+.rc > header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.rc > header h3 { font-size: 15px; }
+.mem { display: grid; grid-template-columns: 36px minmax(0,1fr) auto; gap: 0 10px; align-items: center; padding: 6px 0; }
+.mem .cv { width: 36px; height: 36px; grid-row: span 2; }
+.mem small { color: var(--ink-3); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.mem .pillbtn { grid-row: span 2; }
+.lease { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 4px 0; }
+.lease code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.note { font-size: 13px; color: var(--ink-2); line-height: 1.5; padding: 6px 0; }
+.note + .note { border-top: 1px solid var(--line); }
+.note b { color: var(--ink); }
+.feed li { display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 8px; font-size: 12px; padding: 4px 0; color: var(--ink-2); }
+.feed time { color: var(--ink-3); }
+/* chat in right panel */
+.msgs { display: grid; gap: 14px; }
+.msg { display: grid; grid-template-columns: 28px minmax(0,1fr); gap: 2px 10px; }
+.msg .cv { width: 28px; height: 28px; grid-row: span 3; }
+.msg .h { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--ink-3); }
+.msg .h b { color: var(--ink); font-size: 14px; }
+.msg .b { line-height: 1.55; color: var(--ink-2); }
+.msg .rc2 { font-size: 11px; color: var(--ink-3); }
+.mention { color: var(--run-text); font-weight: 600; }
+.sysline { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--panel-2); font-size: 13px; color: var(--ink-2); }
+.sysline.need { background: var(--need-soft); color: var(--need-text); font-weight: 600; }
+.sysline button { margin-left: auto; color: inherit; font-weight: 700; white-space: nowrap; }
+.composer { padding: 10px 16px 14px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.composer .targets { display: flex; gap: 6px; flex-wrap: wrap; }
+.composer .targets .chip { padding: 4px 10px; font-size: 12px; }
+.composer .in { display: flex; gap: 8px; }
+.composer textarea { flex: 1; resize: none; min-height: 40px; padding: 9px 14px; border-radius: 20px; border: 0; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--line); }
+.composer .hint { font-size: 11px; color: var(--ink-3); }
+/* queue */
+.q-h { font-size: 15px; font-weight: 700; margin: 8px 0 8px; }
+.q-i { display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 4px 12px; padding: 8px; border-radius: 6px; align-items: center; }
+.q-i:hover { background: var(--hover); }
+.q-i .t { font-weight: 600; }
+.q-i .t.playing { color: var(--run-text); }
+.q-i .s { font-size: 13px; color: var(--ink-3); }
+.q-i .acts { grid-column: 2; display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+
+/* ================================================================ player bar */
+.player { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 1.6fr) minmax(180px, 1fr); align-items: center; gap: 16px; padding: 0 16px; }
+.np { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.np .cv { width: 56px; height: 56px; }
+.np .bd { min-width: 0; }
+.np .t { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np .s { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np .s button:hover { color: var(--ink); text-decoration: underline; }
+.ctr { display: grid; justify-items: center; gap: 6px; }
+.ctr .btns { display: flex; align-items: center; gap: 14px; }
+.ctr .play { width: 36px; height: 36px; border-radius: 50%; background: var(--ink); color: var(--panel); display: grid; place-items: center; }
+.ctr .play:hover { transform: scale(1.06); }
+.prog { width: 100%; max-width: 640px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 10px; align-items: center; font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.segs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+.segs i { height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--ink) 18%, transparent); position: relative; overflow: hidden; }
+.segs i.done { background: var(--ink-2); }
+.segs i.now { background: var(--run-text); }
+.rt { justify-self: end; display: flex; align-items: center; gap: 4px; }
+
+/* mobile bottom nav */
+.mnav { display: none; }
+
+/* ================================================================ responsive */
+@media (min-width: 768px) and (max-width: 1180px) {
+  .shell, .shell[data-right="none"] { grid-template-columns: 76px minmax(0,1fr); }
+  .lib-h h2 span, .lib-h .pillbtn, .lib-h .ib, .lib-tools { display: none; }
+  .lib-h { justify-content: center; }
+  .lib-h h2 { margin: 0; }
+  .li { grid-template-columns: 48px; justify-content: center; }
+  .li .bd, .li .n, .li .eq { display: none; }
+  .li { position: relative; }
+  .li.has-need::after { content: ""; position: absolute; top: 6px; right: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--need); box-shadow: 0 0 0 2px var(--panel); }
+  .right { position: fixed; top: 64px; right: 8px; bottom: 92px; width: 360px; z-index: 10; box-shadow: var(--shadow); }
+  .brand span { display: none; }
+}
+@media (max-width: 767px) {
+  body { grid-template-rows: 56px minmax(0,1fr) auto auto; }
+  .top { grid-template-columns: minmax(0,1fr) auto; padding: 0 12px; }
+  .top .c, .brand span, .preview-tag, .top .l .ib { display: none; }
+  .shell, .shell[data-right="none"] { grid-template-columns: 1fr; padding: 0; gap: 0; }
+  .panel { border-radius: 0; }
+  .lib, .right { display: none !important; }
+  .shell[data-m="lib"] .lib { display: grid !important; }
+  .shell[data-m="lib"] .main { display: none; }
+  .shell[data-m="right"] .right { display: grid !important; position: static; width: auto; box-shadow: none; }
+  .shell[data-m="right"] .main { display: none; }
+  .hero, .pad { padding-left: 16px; padding-right: 16px; }
+  .sc { grid-template-columns: 1fr 1fr; }
+  .sc-i { grid-template-columns: 48px minmax(0,1fr); height: 48px; font-size: 12px; gap: 8px; padding-right: 6px; }
+  .sc-i .cv { width: 48px; height: 48px; }
+  .sc-i .go, .sc-i .dot { display: none; }
+  .ask { grid-template-columns: minmax(0,1fr); }
+  .fhead { flex-direction: column; align-items: flex-start; padding: 24px 16px 16px; }
+  .fhead { padding-top: 16px; gap: 10px; }
+  .fhead .cv { display: none; }
+  .fhead h1 { font-size: 26px; }
+  .fbar { padding: 14px 16px 8px; gap: 12px; }
+  .fbar .ctx { flex: 1 1 100%; order: 3; }
+  .fbar .tabs { margin-left: 0; order: 4; flex-wrap: nowrap; overflow-x: auto; width: 100%; scrollbar-width: none; }
+  .tbl, .rounds { margin-left: 8px; margin-right: 8px; }
+  .tr, .tbl.tasks .tr { grid-template-columns: minmax(0,1fr) auto; padding: 8px; }
+  .tr .no, .tr.th { display: none; }
+  .tr .ver { display: none; }
+  .tr .gx { grid-column: 1 / -1; }
+  .player { grid-template-columns: minmax(0,1fr) auto; margin: 6px 8px 0; padding: 6px 8px 8px; border-radius: 8px; background: var(--panel-2); position: relative; gap: 8px; }
+  .np .cv { width: 40px; height: 40px; }
+  .ctr .btns > :not(.play), .rt { display: none; }
+  .prog { position: absolute; left: 8px; right: 8px; bottom: 2px; max-width: none; grid-template-columns: 1fr; }
+  .prog > span { display: none; }
+  .segs i { height: 2px; }
+  .mnav { display: grid; grid-template-columns: repeat(4, 1fr); padding: 4px 0 8px; }
+  .mnav button { display: grid; justify-items: center; gap: 2px; padding: 6px 0; font-size: 11px; font-weight: 600; color: var(--ink-3); position: relative; }
+  .mnav button[aria-current="page"] { color: var(--ink); }
+  .mnav .badge { position: absolute; top: 2px; left: calc(50% + 6px); min-width: 16px; height: 16px; padding: 0 4px; border-radius: 99px; background: var(--need); color: var(--need-ink); font-size: 10px; font-weight: 800; display: grid; place-items: center; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="l">
+    <div class="brand"><b>AI Bridge</b><span>E:\Interaction-ai</span></div>
+    <button class="ib" data-act="back" aria-label="后退" title="后退"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3 5 8l5 5"/></svg></button>
+    <button class="ib" data-act="fwd" aria-label="前进" title="前进"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5"/></svg></button>
+    <span class="preview-tag">预览 · 示例数据</span>
+  </div>
+  <div class="c">
+    <button class="home-btn" data-act="page" data-page="home" aria-label="主页" title="主页" id="home-btn"></button>
+    <label class="search"><span id="search-ic"></span><span class="sr">搜索</span><input placeholder="找会议、任务、文件或成员"><span class="sep"></span><button class="ib" data-act="page" data-page="office" aria-label="办公室" title="办公室：看所有成员在做什么" id="office-btn"></button></label>
+  </div>
+  <div class="r">
+    <button class="pillbtn run sm" title="发起会议或工作流"><span aria-hidden="true">＋</span>发起</button>
+    <button class="ib" data-act="theme" aria-label="切换浅色 / 深色" title="切换浅色 / 深色"><svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5v11a5.5 5.5 0 0 1 0-11z"/></svg></button>
+    <span class="av human" style="width:32px;height:32px;font-size:13px">你</span>
+  </div>
+</header>
+
+<div class="shell" id="shell" data-right="detail" data-m="home">
+  <nav class="panel lib" aria-label="工作区">
+    <div class="lib-h">
+      <h2><svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M4 3h2v18H4zM9 3h2v18H9zm5.2.6 1.9-.6 5.6 17.2-1.9.6z"/></svg><span>工作区</span></h2>
+      <button class="pillbtn ghost sm" title="发起会议或工作流">＋ 发起</button>
+    </div>
+    <div class="lib-tools">
+      <div class="chips" id="lib-chips"></div>
+      <div class="row"><span id="search-ic2"></span><span>最近活动 ☰</span></div>
+    </div>
+    <div class="lib-list" id="lib-list"></div>
+  </nav>
+
+  <main class="panel main" id="main" aria-live="polite"></main>
+
+  <aside class="panel right" id="right" aria-label="侧栏"></aside>
+</div>
+
+<footer class="player" id="player" aria-label="正在进行"></footer>
+
+<nav class="mnav" id="mnav" aria-label="视图"></nav>
+
+<script>
+(function () {
+  // ================================================================ icons
+  const I = {
+    meeting: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h12v8H6l-3 3v-3H2z"/></svg>',
+    run: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 3h5v4H2zm7 0h5v4H9zM2 9h5v4H2zm9.5 0L14 11l-2.5 2V9z"/></svg>',
+    bell: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 1.5a4.5 4.5 0 0 0-4.5 4.5v3L2 11v1h12v-1l-1.5-2V6A4.5 4.5 0 0 0 8 1.5zM6.2 13a1.8 1.8 0 0 0 3.6 0z"/></svg>',
+    office: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    home: '<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3 3 10.5V21h6.5v-6h5v6H21V10.5z"/></svg>',
+    search: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>',
+    check: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+    arrow: '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5 12 8l-8 5.5z"/></svg>',
+    pause: '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2h3v12H4zm5 0h3v12H9z"/></svg>',
+    stop: '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>',
+    skip: '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2.5 10 8l-8 5.5zM11 2h2.5v12H11z"/></svg>',
+    redo: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3v4H9"/><path d="M13 7a5.5 5.5 0 1 0 .5 3"/></svg>',
+    jump: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>',
+    detail: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M10 2.5v11"/></svg>',
+    chat: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M2 3h12v8H6l-3 3v-3H2z"/></svg>',
+    queue: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 4h12M2 8h8M2 12h6"/><path d="M12 10v4M10 12h4"/></svg>',
+    close: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m3 3 10 10M13 3 3 13"/></svg>',
+    eq: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="6" width="2.5" height="8" rx="1"/><rect x="6.75" y="2" width="2.5" height="12" rx="1"/><rect x="11.5" y="8" width="2.5" height="6" rx="1"/></svg>',
+    lib: '<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M4 3h2v18H4zM9 3h2v18H9zm5.2.6 1.9-.6 5.6 17.2-1.9.6z"/></svg>',
+  };
+
+  // ================================================================ sample data (same as P3 shell)
+  const folders = [
+    { id: "m2", kind: "meeting", title: "P3 面板：文件夹与视觉重做", status: "执行中", group: "need", needs: 1, at: "3 分钟前", members: ["claude", "codex"], c: ["#7c4ddb", "#e8900c"] },
+    { id: "m4", kind: "meeting", title: "M3：ACP 后台成员怎么接入", status: "第 2 轮 · 互评", group: "run", needs: 0, at: "12 分钟前", members: ["claude", "codex"], c: ["#2b59c3", "#7c4ddb"] },
+    { id: "r5", kind: "run", title: "修复 smoke 的端口占用提示", status: "执行中", group: "run", needs: 0, at: "25 分钟前", members: ["codex", "claude"], c: ["#0b8173", "#2b59c3"] },
+    { id: "m1", kind: "meeting", title: "修复 0.8.0 审查留下的小问题", status: "已完成", group: "done", needs: 0, at: "今天 14:10", members: ["claude", "codex"], c: ["#475467", "#7c4ddb"] },
+    { id: "r2", kind: "run", title: "P2：一键加入和门铃加固", status: "已完成", group: "done", needs: 0, at: "今天 12:05", members: ["codex", "claude"], c: ["#0b8173", "#475467"] },
+    { id: "r1", kind: "run", title: "面板重构 P1", status: "已完成", group: "done", needs: 0, at: "今天 11:06", members: ["codex", "claude"], c: ["#2b59c3", "#475467"] },
+  ];
+  const agents = [
+    { id: "claude", st: "reviewing", label: "审查中", tone: "run", ev: "attempt #18 进行中（T3 审查）", since: "9 分钟" },
+    { id: "codex", st: "awaiting", label: "等你审批", tone: "need", ev: "T2 实现交接等你审批", since: "3 分钟" },
+    { id: "gemini", st: "unknown", label: "状态未知", tone: "done", ev: "最近可靠状态：从未加入（M3 计划成员）", since: "—" },
+  ];
+  const handoffs = [
+    { agent: "codex", stage: "T2 实现", verdict: null, summary: "Meeting 文件夹布局：三栏、分区标签、交接分页", sha: "a1c93e0", at: "3 分钟前", gate: true },
+    { agent: "claude", stage: "T1 审查", verdict: "approve", summary: "folders 接口与分页通过，smoke 238 项全过", sha: "77be012", at: "18 分钟前" },
+    { agent: "codex", stage: "T1 实现", verdict: null, summary: "新增 GET /api/folders 与 /api/folders/:id，交接分页 20 条", sha: "4d2f9a8", at: "41 分钟前" },
+    { agent: "claude", stage: "T3 实现", verdict: null, summary: "设计 token 与深色模式，主要文字对比度 ≥ 7:1", sha: "b03e771", at: "52 分钟前" },
+    { agent: "codex", stage: "T3 审查", verdict: "reject", summary: "深色模式下需要你徽标对比度 3.9:1，不达标", sha: "e8a1c40", at: "1 小时前" },
+    { agent: "claude", stage: "T3 实现", verdict: null, summary: "初版设计 token", sha: "5c0d3b2", at: "1 小时前" },
+  ];
+  const tasks = [
+    { key: "T1", title: "folders 只读接口与分页", status: ["已完成", "done"], owner: "codex", reviewer: "claude", paths: "src/engine/folders.ts 等 3 个文件", rounds: 2 },
+    { key: "T2", title: "Meeting 文件夹布局", status: ["待你审批", "need"], owner: "codex", reviewer: "claude", paths: "panel/js/views/meeting.js 等 2 个文件", rounds: 1 },
+    { key: "T3", title: "设计 token、深色模式、Office 图形", status: ["审查中", "run"], owner: "claude", reviewer: "codex", paths: "panel/app.css 等 2 个文件", rounds: 3 },
+  ];
+  const rounds = [
+    { n: 1, kind: "提案", sum: [["claude", "三栏：文件夹 / 当前夹 / 固定区，交接分页 20 条"], ["codex", "先做只读 folders 接口，snapshot 只加 folders_head"]] },
+    { n: 2, kind: "互评", sum: [["claude", "同意接口方案；固定区不随夹重建"], ["codex", "分区默认打开当前阶段；手机先列表后详情"]] },
+    { n: 3, kind: "定稿", sum: [["claude", "拆成 T1 接口、T2 布局、T3 视觉，三项可并行"]] },
+  ];
+  const SCENES = {
+    working: ["工作中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><rect x="14" y="18" width="68" height="46" rx="6"/><path d="M38 76h20M48 64v12"/><path d="M28 34l8 7-8 7M42 48h14" /></svg>', "run"],
+    reviewing: ["审查中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M22 14h34l14 14v40a4 4 0 0 1-4 4H22a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4z"/><path d="M30 34h22M30 44h16"/><circle cx="62" cy="62" r="11"/><path d="M70 70l10 10"/></svg>', "run"],
+    meeting: ["开会中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4"><ellipse cx="48" cy="54" rx="28" ry="12"/><circle cx="20" cy="30" r="7"/><circle cx="48" cy="22" r="7"/><circle cx="76" cy="30" r="7"/></svg>', "run"],
+    awaiting: ["等你审批", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"><path d="M14 56l12-30h44l12 30v18a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4z"/><path d="M14 56h22l4 8h16l4-8h22"/><circle cx="72" cy="22" r="10" fill="currentColor" stroke="none"/></svg>', "need"],
+    idle: ["待命", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M22 40h44v16a18 18 0 0 1-18 18h-8a18 18 0 0 1-18-18z"/><path d="M66 46h6a8 8 0 0 1 0 16h-6"/><path d="M36 18c0 6 6 6 6 12M50 18c0 6 6 6 6 12"/></svg>', "ok"],
+    unreach: ["叫不醒", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"><path d="M48 14l36 64H12z"/><path d="M48 40v18M48 66v2" stroke-linecap="round"/></svg>', "bad"],
+    unknown: ["状态未知", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-dasharray="6 6"><circle cx="48" cy="48" r="32"/><path d="M38 40a10 10 0 1 1 14 9c-3 2-4 4-4 7M48 66v1" stroke-dasharray="0"/></svg>', "done"],
+    offline: ["离线", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M60 18a30 30 0 1 0 18 46A26 26 0 0 1 60 18z"/></svg>', "done"],
+  };
+  const NOW = { folder: "m2", task: "T3", stage: "审查", agent: "claude", attempt: 18, since: "已 9 分钟", seg: 1 };
+
+  // ================================================================ helpers
+  const $ = (s) => document.querySelector(s);
+  const F = (id) => folders.find((f) => f.id === id);
+  const letter = (id) => id === "claude" ? "C" : id === "codex" ? "X" : id === "gemini" ? "G" : "你";
+  const av = (id) => '<span class="av ' + id + '">' + letter(id) + "</span>";
+  const who = (id) => '<span class="who">' + av(id) + id + "</span>";
+  const grad = (f) => "linear-gradient(135deg," + f.c[0] + "," + f.c[1] + ")";
+  const cover = (f, cls) => '<span class="cv ' + (cls || "") + '" style="--g:' + grad(f) + '">' + I[f.kind] + "</span>";
+  const acover = (id, cls) => '<span class="cv round ' + (cls || "") + '" style="--g:var(--m-' + (id === "gemini" ? "unknown" : id) + ')"><b>' + letter(id) + "</b></span>";
+  const needCover = (cls) => '<span class="cv ' + (cls || "") + '" style="--g:linear-gradient(135deg,#f5a524,#9a4604)">' + I.bell + "</span>";
+  const kindName = (f) => f.kind === "meeting" ? "会议" : "工作流";
+  const tone = (f) => f.group === "need" ? "need" : f.group === "run" ? "run" : "done";
+  const needCount = 2;
+  const verdictPill = (v) => v === "approve" ? '<span class="pill ok">通过</span>' : v === "reject" ? '<span class="pill bad">打回</span>' : '<span class="pill done">交接</span>';
+
+  // ================================================================ state + history
+  const S = {
+    page: "home", folder: "m2", tab: null,
+    right: innerWidth > 1180 ? "detail" : "none",
+    m: "home", libFilter: "all", homeFilter: "all",
+    hist: [{ page: "home" }], hi: 0,
+  };
+  function nav(p) { S.hist = S.hist.slice(0, S.hi + 1); S.hist.push(p); S.hi++; apply(p); }
+  function apply(p) {
+    S.page = p.page;
+    if (p.folder) { if (S.folder !== p.folder) S.tab = null; S.folder = p.folder; }
+    if (p.tab) S.tab = p.tab;
+    S.m = "home";
+    renderAll();
+    $("#main").scrollTop = 0;
+  }
+
+  // ================================================================ library
+  function renderLib() {
+    const chips = [["all", "全部"], ["meeting", "会议"], ["run", "工作流"], ["agent", "成员"]];
+    $("#lib-chips").innerHTML = chips.map(([k, n]) => '<button class="chip" data-act="libf" data-f="' + k + '" aria-pressed="' + (S.libFilter === k) + '">' + n + "</button>").join("");
+    const fl = S.libFilter;
+    let html = "";
+    if (fl === "all") html += '<button class="li has-need" data-act="right" data-r="queue" title="待你处理">' + needCover() +
+      '<span class="bd"><span class="t">待你处理</span><span class="s"><span class="pin">📌</span>已固定 · ' + needCount + ' 项</span></span><span class="n">' + needCount + "</span></button>";
+    if (fl !== "agent") html += folders.filter((f) => fl === "all" || f.kind === fl).map((f) => {
+      const playing = f.id === NOW.folder;
+      return '<button class="li' + (f.needs ? " has-need" : "") + '" data-act="folder" data-id="' + f.id + '" aria-current="' + (S.page === "folder" && S.folder === f.id) + '" title="' + f.title + '">' + cover(f) +
+        '<span class="bd"><span class="t' + (playing ? " playing" : "") + '">' + f.title + '</span><span class="s">' + kindName(f) + " · " + f.status + "</span></span>" +
+        (f.needs ? '<span class="n">' + f.needs + "</span>" : playing ? '<span class="eq">' + I.eq + "</span>" : "") + "</button>";
+    }).join("");
+    if (fl === "all" || fl === "agent") html += agents.map((a) =>
+      '<button class="li' + (a.tone === "need" ? " has-need" : "") + '" data-act="page" data-page="office" title="' + a.id + '">' + acover(a.id) +
+      '<span class="bd"><span class="t">' + a.id + '</span><span class="s">成员 · ' + a.label + "</span></span></button>").join("");
+    $("#lib-list").innerHTML = html;
+  }
+
+  // ================================================================ main pages
+  function home() {
+    const hf = S.homeFilter;
+    const pass = (f) => hf === "all" || f.kind === hf;
+    const chips = [["all", "全部"], ["meeting", "会议"], ["run", "工作流"]];
+    const sc = '<button class="sc-i" data-act="right" data-r="queue">' + needCover() + '<span class="t">待你处理</span><span class="dot"></span><span class="go">' + I.arrow + "</span></button>" +
+      folders.filter(pass).slice(0, 6).map((f) => '<button class="sc-i" data-act="folder" data-id="' + f.id + '">' + cover(f) + '<span class="t">' + f.title + "</span>" +
+        (f.needs ? '<span class="dot"></span>' : "<span></span>") + '<span class="go">' + I.arrow + "</span></button>").join("") +
+      '<button class="sc-i" data-act="page" data-page="office"><span class="cv" style="--g:linear-gradient(135deg,#475467,#0b8173)">' + I.office + '</span><span class="t">办公室</span><span></span><span class="go">' + I.arrow + "</span></button>";
+    const g = handoffs[0];
+    const promo = '<div class="promo"><div class="kick"><span class="pill need">待你审批</span>' + who(g.agent) + "<span>" + g.stage + " · 会议 #2 · " + g.at + "</span></div>" +
+      "<h3>" + g.summary + "</h3>" +
+      "<ul><li>左栏分组：等你处理 / 进行中 / 已完成，已完成默认折叠</li><li>交接每页 20 条，「更早的交接」继续加载</li><li>手机：先列表后详情，固定区进抽屉</li></ul>" +
+      '<div class="acts"><input placeholder="备注（可选，会带进返工信）" aria-label="备注"><button class="pillbtn need">批准</button><button class="pillbtn ghost">打回到「实现」</button><button class="link" data-act="folder" data-id="m2" data-tab="handoffs">在会议 #2 中查看</button></div></div>' +
+      '<div class="ask">' + acover("codex", "") + '<span class="q">深色模式的手动切换存 localStorage 还是跟随系统？<small>codex 提问 · 7 分钟前</small></span><button class="pillbtn ghost sm" data-act="right" data-r="queue">回答</button></div>';
+    const card = (f) => '<button class="card' + (f.needs ? " need-card" : "") + '" data-act="folder" data-id="' + f.id + '">' + cover(f, "fill") +
+      '<span class="t">' + f.title + '</span><span class="s"><span class="pill ' + tone(f) + '">' + f.status + "</span> " + f.at + '</span><span class="go">' + I.arrow + "</span></button>";
+    const running = folders.filter((f) => f.group !== "done" && pass(f));
+    const done = folders.filter((f) => f.group === "done" && pass(f));
+    return '<div class="hero" style="--tint:color-mix(in srgb,#e8900c 22%,transparent)">' +
+      '<div class="chips-row">' + chips.map(([k, n]) => '<button class="chip" data-act="homef" data-f="' + k + '" aria-pressed="' + (hf === k) + '">' + n + "</button>").join("") + "</div>" +
+      '<div class="sc">' + sc + "</div></div>" +
+      '<div class="pad">' +
+      '<section class="sec" style="margin-top:4px"><div class="sec-h"><h2><small>2 项要你拍板</small>等你处理</h2><button class="link" data-act="right" data-r="queue">显示全部</button></div>' + promo + "</section>" +
+      (running.length ? '<section class="sec"><div class="sec-h"><h2>进行中</h2><button class="link">显示全部</button></div><div class="cards">' + running.map(card).join("") + "</div></section>" : "") +
+      (hf === "all" ? '<section class="sec"><div class="sec-h"><h2>成员</h2><button class="link" data-act="page" data-page="office">去办公室</button></div><div class="cards">' +
+        agents.map((a) => '<button class="card" data-act="page" data-page="office">' + acover(a.id, "fill") + '<span class="t">' + a.id + '</span><span class="s"><span class="pill ' + a.tone + '">' + a.label + "</span> " + a.since + "</span></button>").join("") + "</div></section>" : "") +
+      (done.length ? '<section class="sec"><div class="sec-h"><h2>最近完成</h2><button class="link">显示全部</button></div><div class="cards">' + done.map(card).join("") + "</div></section>" : "") +
+      "</div>";
+  }
+
+  function tabsFor(f) {
+    if (f.id === "m4") return [["discuss", "讨论"], ["minutes", "纪要"]];
+    return [["handoffs", "交接"], ["tasks", "任务"], ["discuss", "讨论"], ["minutes", "纪要"]];
+  }
+  function defaultTab(f) { return f.id === "m4" ? "discuss" : f.group === "done" ? "tasks" : "handoffs"; }
+
+  function folderPage() {
+    const f = F(S.folder);
+    if (!S.tab) S.tab = defaultTab(f);
+    const phaseNames = f.kind === "meeting" ? ["提案", "互评", "定稿", "批准", "执行"] : ["实现", "审查", "完成"];
+    const now = f.id === "m4" ? 1 : f.group === "done" ? 99 : f.kind === "meeting" ? 4 : 0;
+    const head = '<div class="fhead" style="--tint:' + f.c[0] + '">' + cover(f) +
+      '<div class="tx"><span class="type">' + kindName(f) + " #" + f.id.slice(1) + "</span><h1>" + f.title + "</h1>" +
+      '<div class="meta">' + f.members.map(who).join('<span class="sep"></span>') + '<span class="sep"></span><span>' + (f.id === "m4" ? "第 2 轮" : "3 轮 · 3 个任务 · 17 条交接") + '</span><span class="sep"></span><span>' + f.at + "</span></div>" +
+      '<div class="phase-line">' + phaseNames.map((p, i) => '<span class="' + (i < now ? "done" : i === now ? "now" : "") + '">' + p + "</span>").join("") + "</div></div></div>";
+    let bigBtn, ctx;
+    if (f.needs) { bigBtn = '<button class="big need" data-act="tab" data-tab="handoffs" aria-label="去审批 T2" title="去审批 T2">' + I.check + "</button>"; ctx = "T2 待你审批 · T3 审查中"; }
+    else if (f.group === "done") { bigBtn = '<button class="big run" aria-label="以此为基础开新会议" title="以此为基础开新会议">' + I.redo.replace('width="16" height="16"', 'width="22" height="22"') + "</button>"; ctx = "已完成 · 纪要已提交"; }
+    else { bigBtn = '<button class="big run" data-act="tab" data-tab="' + (f.id === "m4" ? "discuss" : "tasks") + '" aria-label="看当前这一步" title="看当前这一步">' + I.jump.replace('width="16" height="16"', 'width="22" height="22"') + "</button>"; ctx = f.id === "m4" ? "第 2 轮互评，codex 还没发言" : "codex 正在实现"; }
+    const bar = '<div class="fbar" style="--tint:' + f.c[0] + '">' + bigBtn +
+      (f.group !== "done" ? '<button class="ib" title="' + (f.kind === "meeting" && f.id === "m4" ? "取消会议（会确认）" : "停止工作流（会确认）") + '" aria-label="停止">' + I.stop + "</button>" : "") +
+      '<button class="ib" title="更多" aria-label="更多">⋯</button><span class="ctx">' + ctx + "</span>" +
+      '<div class="tabs" role="tablist">' + tabsFor(f).map(([k, n]) => '<button class="chip" role="tab" data-act="tab" data-tab="' + k + '" aria-pressed="' + (S.tab === k) + '" aria-selected="' + (S.tab === k) + '">' + n +
+        (k === "handoffs" && f.needs ? '<span class="tn">1</span>' : "") + "</button>").join("") + "</div></div>";
+    const body = ({ handoffs: handoffTable, tasks: taskTable, discuss: discuss, minutes: minutes })[S.tab](f);
+    return head + bar + body;
+  }
+
+  function handoffTable(f) {
+    const rows = handoffs.map((h, i) => {
+      const ti = '<span class="ti">' + acover(h.agent) + "<b>" + h.stage + " · " + h.summary + "</b><span>" + h.agent + " · <code>" + h.sha + "</code></span></span>";
+      if (h.gate && f.needs) return '<div class="tr gate"><span class="no">●</span>' + ti + '<span class="ver"><span class="pill need">待你审批</span></span><span class="tm">' + h.at + "</span>" +
+        '<div class="gx"><ul><li>左栏分组：等你处理 / 进行中 / 已完成</li><li>交接每页 20 条，「更早的交接」继续加载</li><li>手机：先列表后详情，固定区进抽屉</li></ul>' +
+        '<div class="acts"><input class="field" placeholder="备注（可选）" aria-label="备注"><button class="pillbtn need sm">批准</button><button class="pillbtn ghost sm">打回到「实现」</button></div></div></div>';
+      return '<div class="tr"><span class="no">' + (i + 1) + "</span>" + ti + '<span class="ver">' + verdictPill(h.verdict) + '</span><span class="tm">' + h.at + "</span></div>";
+    }).join("");
+    return '<div class="tbl"><div class="tr th"><span class="no">#</span><span>交接</span><span class="ver">结论</span><span class="tm">时间</span></div>' + rows +
+      '<button class="pillbtn ghost sm more">更早的交接（11）</button></div>';
+  }
+  function taskTable() {
+    return '<div class="tbl tasks"><div class="tr th"><span class="no">#</span><span>任务</span><span class="ver">状态</span><span class="tm">负责 / 审查</span></div>' +
+      tasks.map((t) => '<div class="tr"><span class="no">' + t.key + '</span><span class="ti"><span class="cv" style="--g:var(--panel-2);color:var(--ink-2)"><b style="font-size:14px;color:var(--ink-2)">' + t.key + "</b></span><b>" + t.title + "</b><span>" + t.paths + " · 第 " + t.rounds + " 轮</span></span>" +
+        '<span class="ver"><span class="pill ' + t.status[1] + '">' + t.status[0] + '</span></span><span class="tm">' + av(t.owner) + " → " + av(t.reviewer) + "</span></div>").join("") + "</div>";
+  }
+  function discuss(f) {
+    if (f.id === "m4") return '<div class="rounds"><article class="rnd"><header><span class="pill run">第 2 轮 · 互评</span><h3>当前轮</h3><span class="r">等待 codex</span></header>' +
+      '<div class="speeches"><div class="speech claude">' + who("claude") + "<p>ACP 成员作为「后台成员」接入：桥用 session/new 把 MCP 地址传过去，任务用 session/prompt 下发，审批统一走 session/request_permission。建议先接 codex-acp；Gemini CLI 第二步。风险是 ACP 会话生命周期和桌面会话不同，需要在 presence 里区分 sessionless。</p></div>" +
+      '<div class="speech waiting">' + who("codex") + "<span>还没发言<br><small>已叫醒 2 分钟</small></span></div></div></article>" +
+      '<article class="rnd"><header><span class="pill done">第 1 轮 · 提案</span><h3>2 人已发言</h3><button class="r">展开</button></header><ul class="sum"><li>' + av("claude") + "<span>先接 codex-acp，再接 Gemini CLI</span></li><li>" + av("codex") + "<span>ACP worker 放在独立进程池，限制并发 2</span></li></ul></article></div>";
+    return '<div class="rounds">' + rounds.map((r) => '<article class="rnd"><header><span class="pill done">第 ' + r.n + " 轮 · " + r.kind + "</span><h3>" + r.sum.length + ' 人发言</h3><button class="r">展开</button></header>' +
+      '<ul class="sum">' + r.sum.map(([a, s]) => "<li>" + av(a) + "<span>" + s + "</span></li>").join("") + "</ul></article>").join("") + "</div>";
+  }
+  function minutes(f) {
+    return '<div class="tbl"><div class="tr"><span class="no">📄</span><span class="ti"><span class="cv" style="--g:var(--panel-2)"></span><b>doc/meetings/' + f.id + "-纪要.md</b><span>" + (f.group === "done" ? "已提交" : "会议结束后生成") + '</span></span><span></span><span class="tm">' + f.at + "</span></div></div>";
+  }
+
+  function officePage() {
+    return '<div class="hero" style="--tint:color-mix(in srgb,#0b8173 30%,transparent);padding-top:40px"><h1 style="font-size:clamp(28px,3.6vw,48px);font-weight:900;letter-spacing:-.03em">办公室</h1><p class="muted" style="margin-top:6px">每个成员此刻在做什么。点卡片看任务，或直接发消息。</p></div>' +
+      '<div class="pad"><div class="desks">' + agents.map((a) => {
+        const sc = SCENES[a.st];
+        return '<article class="desk st-' + a.st + '"><div class="scene">' + sc[1] + '</div><div class="info"><div class="nm">' + (a.id === "gemini" ? '<span class="who"><span class="av">G</span>gemini</span>' : who(a.id)) +
+          '<span class="pill ' + sc[2] + '" style="margin-left:auto">' + sc[0] + '</span></div><div class="ev">' + a.ev + " · " + a.since + "</div>" +
+          '<div class="acts"><button class="pillbtn ghost sm">看任务</button><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button>' + (a.st === "unknown" ? '<button class="pillbtn ghost sm">查看异常</button>' : "") + "</div></div></article>";
+      }).join("") +
+      '<article class="desk st-meeting"><div class="scene">' + SCENES.meeting[1] + '</div><div class="info"><div class="nm"><b>会议桌</b><span class="pill run" style="margin-left:auto">会议 #4 · 第 2 轮</span></div><div class="ev">M3：ACP 后台成员怎么接入。等待 codex 互评。</div><div class="acts"><button class="pillbtn ghost sm" data-act="folder" data-id="m4">进入会议</button></div></div></article>' +
+      "</div>" +
+      '<section class="sec"><div class="sec-h"><h2>状态图例</h2></div><div class="legend">' + Object.keys(SCENES).map((k) => '<div class="lg st-' + k + '"><span class="sw">' + SCENES[k][1] + "</span>" + SCENES[k][0] + "</div>").join("") + "</div></section></div>";
+  }
+
+  // ================================================================ right panel
+  function renderRight() {
+    const r = S.right === "none" ? "detail" : S.right;
+    const close = '<button class="ib" data-act="right" data-r="none" aria-label="关闭侧栏" title="关闭">' + I.close + "</button>";
+    if (r === "chat") {
+      $("#right").innerHTML = '<div class="rp-h"><h2>聊天</h2>' + close + "</div>" +
+        '<div class="rp-b"><div class="msgs">' +
+        '<div class="msg">' + acover("human") + '<div class="h"><b>你</b><span>14:20</span></div><div class="b"><span class="mention">@claude</span> <span class="mention">@codex</span> P3 的配色先按预览壳子走，深色模式也要。</div><div class="rc2">claude 已读 · codex 已读</div></div>' +
+        '<div class="msg">' + acover("claude") + '<div class="h"><b>claude</b><span>14:21</span></div><div class="b">收到。我负责 T3 的 token 和深色模式，<span class="mention">@codex</span> 先做 folders 接口。</div><div class="rc2">codex 已读</div></div>' +
+        '<div class="sysline">' + '<span style="width:14px;height:14px;display:inline-flex">' + I.meeting + '</span><span>会议 #4 第 2 轮：等待 codex</span><button data-act="folder" data-id="m4">查看</button></div>' +
+        '<div class="msg">' + acover("codex") + '<div class="h"><b>codex</b><span>14:36</span></div><div class="b">T2 布局做完了，交接里附了 375px 截图说明。</div><div class="rc2">仅你可见</div></div>' +
+        '<div class="sysline need"><span style="width:14px;height:14px;display:inline-flex">' + I.bell + '</span><span>T2 实现交接待你审批</span><button data-act="folder" data-id="m2" data-tab="handoffs">去审批</button></div>' +
+        "</div></div>" +
+        '<form class="composer" onsubmit="return false"><div class="targets"><button type="button" class="chip" aria-pressed="true">@claude</button><button type="button" class="chip" aria-pressed="false">@codex</button><button type="button" class="chip" aria-pressed="false">@所有人</button></div>' +
+        '<div class="in"><label class="sr" for="say">消息</label><textarea id="say" rows="1" placeholder="说点什么"></textarea><button class="pillbtn run sm" type="button">发送</button></div>' +
+        '<span class="hint">claude 正在做 T3 审查，消息会排队，这一轮结束后送达</span></form>';
+      return;
+    }
+    if (r === "queue") {
+      $("#right").innerHTML = '<div class="rp-h"><h2>待你处理</h2>' + close + "</div>" +
+        '<div class="rp-b"><h3 class="q-h">正在进行</h3>' +
+        '<div class="q-i">' + cover(F(NOW.folder)) + '<span><span class="t playing">' + NOW.task + " " + NOW.stage + '</span><br><span class="s">' + NOW.agent + " · attempt #" + NOW.attempt + "</span></span></div>" +
+        '<h3 class="q-h" style="margin-top:16px">等你处理 · ' + needCount + "</h3>" +
+        '<div class="q-i">' + acover("codex") + '<span><span class="t">T2 实现交接</span><br><span class="s">会议 #2 · 3 分钟前</span></span><div class="acts"><button class="pillbtn need sm">批准</button><button class="pillbtn ghost sm">打回</button><button class="pillbtn ghost sm" data-act="folder" data-id="m2" data-tab="handoffs">查看</button></div></div>' +
+        '<div class="q-i">' + acover("codex") + '<span><span class="t">深色模式切换存哪里？</span><br><span class="s">codex 提问 · 7 分钟前</span></span><div class="acts" style="width:100%"><input class="field" placeholder="你的回答" aria-label="回答"><button class="pillbtn run sm">回答</button></div></div>' +
+        '<h3 class="q-h" style="margin-top:16px">接下来</h3>' +
+        '<div class="q-i">' + cover(F("m4")) + '<span><span class="t">会议 #4 第 3 轮 · 定稿</span><br><span class="s">codex 发言后开始</span></span></div>' +
+        '<div class="q-i">' + cover(F("r5")) + '<span><span class="t">工作流 #5 · 审查</span><br><span class="s">codex 实现后交给 claude</span></span></div>' +
+        "</div>";
+      return;
+    }
+    const f = S.page === "folder" ? F(S.folder) : F(NOW.folder);
+    $("#right").innerHTML = '<div class="rp-h"><h2>' + f.title + "</h2>" + close + "</div>" +
+      '<div class="rp-b"><p class="np-s">' + kindName(f) + " #" + f.id.slice(1) + " · " + f.status + "</p>" +
+      '<section class="rc"><header><h3>成员</h3><button class="link" data-act="page" data-page="office">办公室</button></header>' +
+      '<div class="mem">' + acover("claude") + '<b>claude</b><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button><small><span class="pill run">审查中</span>T3 · attempt #18</small></div>' +
+      '<div class="mem">' + acover("codex") + '<b>codex</b><button class="pillbtn ghost sm" data-act="right" data-r="chat">发消息</button><small><span class="pill need">等你审批</span>T2 · 3 分钟前</small></div></section>' +
+      '<section class="rc"><header><h3>文件租约</h3><span class="muted">3</span></header>' +
+      '<div class="lease"><code>panel/js/views/meeting.js</code><span class="muted">codex · T2</span></div>' +
+      '<div class="lease"><code>panel/app.css</code><span class="muted">claude · T3</span></div>' +
+      '<div class="lease"><code>panel/js/views/office.js</code><span class="muted">claude · T3</span></div></section>' +
+      '<section class="rc"><header><h3>共享笔记</h3><span class="muted">2</span></header>' +
+      '<p class="note"><b>配色</b> · claude<br>主强调色用钴蓝，需要你用琥珀，已结束用石板灰。</p>' +
+      '<p class="note"><b>验收脚本</b> · codex<br>375px 检查用 scripts/check-mobile.mjs（不提交）。</p></section>' +
+      '<section class="rc"><header><h3>最近动态</h3></header><ol class="feed">' +
+      "<li><time>3 分钟</time><span>codex 提交 T2 实现交接</span></li><li><time>9 分钟</time><span>claude 取走 T3 审查</span></li><li><time>18 分钟</time><span>你批准了 T1</span></li><li><time>41 分钟</time><span>codex 提交 T1 实现交接</span></li></ol></section>" +
+      "</div>";
+  }
+
+  // ================================================================ player bar
+  function renderPlayer() {
+    const f = F(NOW.folder);
+    const segs = ["实现", "审查", "完成"].map((n, i) => '<i class="' + (i < NOW.seg ? "done" : i === NOW.seg ? "now" : "") + '" title="' + n + '"></i>').join("");
+    const t = (r, icon, label, badge) => '<button class="ib" data-act="right" data-r="' + r + '" aria-pressed="' + (S.right === r) + '" aria-label="' + label + '" title="' + label + '">' + icon + (badge ? '<span class="badge">' + badge + "</span>" : "") + "</button>";
+    $("#player").innerHTML =
+      '<div class="np">' + cover(f) + '<div class="bd"><div class="t">' + NOW.task + " " + NOW.stage + '</div><div class="s"><button data-act="page" data-page="office">' + NOW.agent + '</button> · <button data-act="folder" data-id="' + f.id + '">' + kindName(f) + " #" + f.id.slice(1) + "</button></div></div></div>" +
+      '<div class="ctr"><div class="btns">' +
+        '<button class="ib" data-act="right" data-r="chat" title="给 ' + NOW.agent + ' 发消息" aria-label="给 ' + NOW.agent + ' 发消息">' + I.chat + "</button>" +
+        '<button class="play" data-act="folder" data-id="' + f.id + '" data-tab="tasks" title="查看这一步" aria-label="查看这一步">' + I.jump + "</button>" +
+        '<button class="ib" data-act="right" data-r="queue" title="接下来" aria-label="接下来">' + I.queue + "</button>" +
+        '<button class="ib" title="停止工作流（会确认）" aria-label="停止工作流">' + I.stop + "</button>" +
+      "</div>" +
+      '<div class="prog"><span>attempt #' + NOW.attempt + '</span><div class="segs" role="progressbar" aria-label="阶段：实现已完成，审查进行中" aria-valuetext="第 2 步，共 3 步">' + segs + "</div><span>" + NOW.since + "</span></div></div>" +
+      '<div class="rt">' + t("detail", I.detail, "详情") + t("chat", I.chat, "聊天") + t("queue", I.queue, "待你处理", needCount) + "</div>";
+  }
+
+  function renderMnav() {
+    const items = [["home", I.home, "主页"], ["lib", I.lib, "工作区"], ["chat", I.chat.replace(/16/g, "22"), "聊天"], ["queue", I.queue.replace(/16/g, "22"), "待处理"]];
+    const cur = S.m === "home" ? "home" : S.m === "lib" ? "lib" : S.right;
+    $("#mnav").innerHTML = items.map(([k, ic, n]) => '<button data-act="m" data-k="' + k + '" aria-current="' + (cur === k ? "page" : "false") + '">' + ic + "<span>" + n + "</span>" + (k === "queue" ? '<span class="badge">' + needCount + "</span>" : "") + "</button>").join("");
+  }
+
+  function renderAll() {
+    $("#shell").dataset.right = S.right;
+    $("#shell").dataset.m = S.m;
+    $("#home-btn").setAttribute("aria-current", S.page === "home" ? "page" : "false");
+    renderLib();
+    $("#main").innerHTML = S.page === "folder" ? folderPage() : S.page === "office" ? officePage() : home();
+    renderRight();
+    renderPlayer();
+    renderMnav();
+  }
+
+  // ================================================================ events
+  $("#home-btn").innerHTML = I.home;
+  $("#office-btn").innerHTML = I.office;
+  $("#search-ic").innerHTML = I.search;
+  $("#search-ic2").innerHTML = I.search;
+
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act]");
+    if (!b) return;
+    const a = b.dataset.act;
+    if (a === "folder") nav({ page: "folder", folder: b.dataset.id, tab: b.dataset.tab });
+    else if (a === "page") nav({ page: b.dataset.page });
+    else if (a === "tab") { S.tab = b.dataset.tab; renderAll(); }
+    else if (a === "libf") { S.libFilter = b.dataset.f; renderLib(); }
+    else if (a === "homef") { S.homeFilter = b.dataset.f; renderAll(); }
+    else if (a === "right") {
+      const r = b.dataset.r;
+      S.right = (S.right === r && r !== "none") ? "none" : r;
+      if (innerWidth < 768) S.m = S.right === "none" ? "home" : "right";
+      renderAll();
+    }
+    else if (a === "m") {
+      const k = b.dataset.k;
+      if (k === "home" || k === "lib") S.m = k; else { S.right = k; S.m = "right"; }
+      renderAll();
+    }
+    else if (a === "back" && S.hi > 0) { S.hi--; apply(S.hist[S.hi]); }
+    else if (a === "fwd" && S.hi < S.hist.length - 1) { S.hi++; apply(S.hist[S.hi]); }
+    else if (a === "theme") {
+      const root = document.documentElement;
+      root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+      try { localStorage.setItem("preview.theme", root.dataset.theme); } catch (err) {}
+    }
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && S.right !== "none" && innerWidth <= 1180) { S.right = "none"; S.m = "home"; renderAll(); } });
+  let saved = null;
+  try { saved = localStorage.getItem("preview.theme"); } catch (err) {}
+  document.documentElement.dataset.theme = saved || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  renderAll();
+})();
+</script>
+</body>
+</html>
