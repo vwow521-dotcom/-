@@ -48,6 +48,7 @@ notify: { enabled: false }
 const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-codex-"));
 const fakeCodex = path.join(codexHome, "fake-codex.mjs");
 const fakeCodexLog = path.join(codexHome, "calls.jsonl");
+const fakeQueueHold = path.join(codexHome, "hold-queue");
 const fakeVersionFile = path.join(codexHome, "version");
 const fakeVersionLog = path.join(codexHome, "version-probes.log");
 const fakeVersionHold = path.join(codexHome, "hold-version");
@@ -67,6 +68,7 @@ if (process.argv[2] === "--version") {
 if (process.argv[2] === "queue" && process.argv[3] === "--help") { console.log("--thread --message"); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(fakeCodexLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 if (fs.existsSync(dir + "/fail")) { process.stderr.write("boom"); process.exit(1); }
+while (fs.existsSync(${JSON.stringify(fakeQueueHold)})) await new Promise((resolve) => setTimeout(resolve, 20));
 const i = process.argv.indexOf("--thread");
 console.log("Queued message m-1 for thread " + process.argv[i + 1] + ".");
 `,
@@ -78,7 +80,13 @@ let daemon: ChildProcess;
 async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<string, string> = {}) {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", project, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome, ...versionEnv },
+    env: {
+      ...process.env,
+      // Panel snapshots can run git status while the fixture stages a file in the same repository.
+      GIT_OPTIONAL_LOCKS: "0",
+      BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2",
+      BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome, ...versionEnv,
+    },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -994,6 +1002,25 @@ notify: { enabled: false }
   check(multiple.error?.includes("多个成员") && multiple.candidates?.join(",") === "qbot,codex_alt",
     "implicit join returns just the product matches when more than one member matches");
   await call(diagnosticCodex, "join", { agent_id: "qbot" });
+
+  async function fetchAfterQueueStarts<T>(trigger: () => T | Promise<T>) {
+    const before = codexCalls().length;
+    fs.writeFileSync(fakeQueueHold, "");
+    try {
+      const result = await trigger();
+      const deadline = Date.now() + 10_000;
+      while (codexCalls().length === before) {
+        if (Date.now() >= deadline) throw new Error("expected a new fake Codex queue invocation");
+        await sleep(20);
+      }
+      // The logged invocation is the simulated wake. Fetch before CLI exit so state-poll latency cannot use up the grace window.
+      const { mails } = await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
+      return { result, mails };
+    } finally {
+      fs.rmSync(fakeQueueHold);
+    }
+  }
+
   const knownThread = "thread-diagnostics";
   h = await runHook({ session_id: knownThread, transcript_path: qtx }, {});
   check(h.out === "{}" && !(await state()).inbox.some((e: any) => e.kind === "diagnostic"),
@@ -1022,9 +1049,9 @@ notify: { enabled: false }
   check(queueStats(s).consecutiveFailures === 0 && queueStats(s).unconfirmedInStreak === 0 &&
     s.events.filter((e: any) => e.kind === "doorbell_recovered").length === 1,
     "one recovery event re-enables the queue and resets its failure streak");
-  const recoveredMail = await api("/api/mail", { to: "qbot", text: "恢复后的信" });
-  await waitState((snapshot) => queueStats(snapshot).rings === 4, "queue did not ring again after recovery");
-  check((await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" })).mails.some((m: any) => m.id === recoveredMail.json.id),
+  const { result: recoveredMail, mails: afterRecovery } = await fetchAfterQueueStarts(() =>
+    api("/api/mail", { to: "qbot", text: "恢复后的信" }));
+  check(afterRecovery.some((m: any) => m.id === recoveredMail.json.id),
     "the restored queue delivers a new wake");
   s = await waitState((snapshot) => queueStats(snapshot).confirmed === 1, "resumed ring was not confirmed by a tool call");
   check(queueStats(s).rings === 4 && queueStats(s).failed === 3 && !inboxItem(s, "diagnostic"),
@@ -1033,17 +1060,17 @@ notify: { enabled: false }
   fs.writeFileSync(path.join(codexHome, "fail"), "");
   const failedWakeMail = await api("/api/mail", { to: "qbot", text: "模拟队列命令报错" });
   s = await waitState((snapshot) => !!queueStats(snapshot).degradedUntil, "a single queue command failure did not trigger cooldown");
-  fs.rmSync(path.join(codexHome, "fail"));
   const commandFailure = queueStats(s);
   check(commandFailure.consecutiveFailures === 1 && commandFailure.ringFailuresInStreak === 1 && commandFailure.unconfirmedInStreak === 0 &&
     activity(s, "qbot")?.evidence.includes("连续 1 次响铃失败"),
     "a command failure degrades immediately and is reported as a ring failure");
-  s = await waitState((snapshot) => !queueStats(snapshot).degradedUntil && queueStats(snapshot).rings > commandFailure.rings,
-    "queue did not retry waiting mail after recovering from a command failure");
-  const recoveredInbox = await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
-  check(queueStats(s).consecutiveFailures === 0 && queueStats(s).ringFailuresInStreak === 0 && queueStats(s).failed === 4 &&
-    recoveredInbox.mails.some((m: any) => m.id === failedWakeMail.json.id),
-    "cooldown recovery clears the ring-failure streak and retries the queued mail");
+  const { mails: retriedMail } = await fetchAfterQueueStarts(() => fs.rmSync(path.join(codexHome, "fail")));
+  s = await waitState((snapshot) => !queueStats(snapshot).degradedUntil && queueStats(snapshot).confirmed === 2,
+    "retried wake was not confirmed after the queue recovered from a command failure");
+  check(queueStats(s).rings === commandFailure.rings + 1 && queueStats(s).consecutiveFailures === 0 &&
+    queueStats(s).ringFailuresInStreak === 0 && queueStats(s).failed === 4 &&
+    retriedMail.some((m: any) => m.id === failedWakeMail.json.id),
+    "cooldown recovery clears the ring-failure streak and confirms the retried wake");
   const ringsBeforeDrift = queueStats(s).rings;
 
   const driftTranscript = path.join(diagnosticProject, "rollout-changed.jsonl");
