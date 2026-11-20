@@ -407,7 +407,8 @@ export class Postman {
     if (this.mailWakers.get(agent) === mine) this.mailWakers.delete(agent);
     if (tick) clearInterval(tick);
     p.waiting = false;
-    this.presence.touch(agent);
+    // A wait ended by a takeover belongs to the old session: it is not a sign of life from the agent.
+    if (p.sessionId === sessionId) this.presence.touch(agent);
     this.ctx.onChange();
     if (outcome === "cancelled") {
       this.ctx.log("wait_cancelled", { agent, heldMs: Date.now() - started });

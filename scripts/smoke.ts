@@ -1197,7 +1197,7 @@ notify: { enabled: false }
     delete process.env.BRIDGE_WAKE_GRACE_SECONDS;
     const realNow = Date.now;
     const frozen = realNow();
-    const sameMs = async (label: string, callAfterRing: boolean) => {
+    const sameMs = async (label: string, mode: "before" | "after" | "takeover") => {
       const mails = new Map<string, { id: string; status: string; to_agent: string; subject: string }>();
       const results: string[] = [];
       const stub = <T extends object>(own: T) => new Proxy(own, { get: (t: any, k) => (k in t ? t[k] : () => undefined) });
@@ -1217,25 +1217,36 @@ notify: { enabled: false }
       const postman = new Postman(ctx as any, presence, doorbells as any, { task: () => null, meeting: () => null, chat: () => null });
       Date.now = () => frozen;
       try {
-        presence.touch("q"); // the handoff call that queues the next stage for the same agent
-        mails.set(label, { id: label, status: "queued", to_agent: "q", subject: label });
-        postman.kick("q");
-        await sleep(0);
-        if (callAfterRing) presence.touch("q"); // a new call in the very same millisecond
         const p = presence.get("q")!;
+        let oldWait: Promise<any> | undefined;
+        if (mode === "takeover") {
+          p.sessionId = "old-session";
+          oldWait = postman.waitForMail("q", "old-session", new AbortController().signal);
+          await sleep(0);
+          p.sessionId = "new-session"; // another session joins as q …
+        }
+        presence.touch("q"); // … or the handoff call that queues the next stage for the same agent
+        mails.set(label, { id: label, status: "queued", to_agent: "q", subject: label });
+        postman.kick("q"); // also ends the old session's wait, after the ring
+        await sleep(0);
+        if (mode === "after") presence.touch("q"); // a new call in the very same millisecond
         const sameInstant = p.lastSeenAt === p.lastRingAt;
+        const waitEnded = oldWait && (await oldWait);
         await sleep(200);
-        return { result: results[0], sameInstant, status: mails.get(label)!.status };
+        return { result: results[0], sameInstant, status: mails.get(label)!.status, waitEnded };
       } finally {
         Date.now = realNow;
       }
     };
-    const before = await sameMs("before", false);
+    const before = await sameMs("before", "before");
     check(before.sameInstant && before.result === "timeout" && before.status === "rung",
       "a call in the ring's millisecond that came before the ring does not confirm the wake");
-    const after = await sameMs("after", true);
+    const after = await sameMs("after", "after");
     check(after.sameInstant && after.result === "confirmed",
       "a call in the ring's millisecond that came after the ring confirms the wake");
+    const takeover = await sameMs("takeover", "takeover");
+    check(takeover.sameInstant && String(takeover.waitEnded?.error).includes("接管") && takeover.result === "timeout" && takeover.status === "rung",
+      "a taken-over session's wait ending after the ring does not confirm the wake");
   }
 
   // ===== I: minutes names through approval, and meeting events linked by id =====
@@ -1308,7 +1319,20 @@ notify: { enabled: false }
   addEvent.run("mbot", "mbot 在会议 #10 第 1 轮提案发言", tie);
   addEvent.run(null, "会议 #9 进入第 2 轮：互评（你的意见：参考会议 #1 的结论）", tie);
   addEvent.run(null, "自由文本提到会议 #8 但不是模板", "2032-01-01T00:00:00.000Z");
+  addEvent.run("QA bot", "QA bot 在会议 #7 第 1 轮提案发言", "2029-01-01T00:00:00.000Z");
+  addEvent.run("QA", "QA bot 在会议 #6 第 1 轮提案发言", "2029-01-02T00:00:00.000Z");
+  // Make the first upgrade fail halfway through the backfill.
+  legacy.exec(`CREATE TRIGGER stop_backfill BEFORE UPDATE OF meeting_id ON events BEGIN SELECT RAISE(ABORT, 'interrupted backfill'); END`);
   legacy.close();
+  const interrupted = spawnSync(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", minutesProject, "--port", String(PORT)], {
+    encoding: "utf8", timeout: 15000, windowsHide: true, env: { ...process.env, BRIDGE_NOTIFY: "0" },
+  });
+  const afterFailure = new DatabaseSync(path.join(minutesProject, ".bridge", "bridge.db"));
+  const hasColumn = (afterFailure.prepare("PRAGMA table_info(events)").all() as { name: string }[]).some((c) => c.name === "meeting_id");
+  afterFailure.exec("DROP TRIGGER stop_backfill");
+  afterFailure.close();
+  check(interrupted.status !== 0 && (interrupted.stderr + interrupted.stdout).includes("interrupted backfill") && !hasColumn,
+    "an upgrade that fails during the backfill leaves no meeting_id column behind");
   await startDaemon(minutesProject);
   const reopenedFolders = (await api("/api/folders?limit=100")).json.folders;
   check(reopenedFolders[0].id === "m9" && reopenedFolders[1].id === "m10" && reopenedFolders[0].updated_at === tie && reopenedFolders[1].updated_at === tie,
@@ -1318,6 +1342,9 @@ notify: { enabled: false }
     "after reopening, the existing meetings keep their folder order and events");
   check((await folderEventsOf("m10")).length === 2 && (await folderEventsOf("m1")).every((t: string) => !t.includes("参考会议 #1")) &&
     (await folderEventsOf("m9")).length === 1, "legacy rows link to the meeting their template names: #10 is not #1, and a note naming #1 stays with #9");
+  check((await folderEventsOf("m7")).includes("QA bot 在会议 #7 第 1 轮提案发言") && (await folderEventsOf("m6")).length === 0 &&
+    reopenedFolders.find((f: any) => f.id === "m7")?.updated_at === "2029-01-01T00:00:00.000Z",
+    "a speech by a member whose id has a space is linked by the row's agent, and a row from another agent is not");
   const paged: string[] = [];
   let cursor = "";
   do {

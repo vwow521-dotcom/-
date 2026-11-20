@@ -242,8 +242,13 @@ type Arg = string | number | null;
 
 // Meeting events written before events.meeting_id existed: the templates the bridge has always used, with
 // the meeting number right after "会议 #". Anchored at the start so a topic or note naming another meeting
-// doesn't count.
-const LEGACY_MEETING_EVENT = /^(?:你打回了|你批准了|\S+ 在)?会议 #([1-9]\d*) /;
+// doesn't count. A member's speech starts with the row's own agent id, which may contain spaces.
+const LEGACY_MEETING_EVENT = /^(?:你打回了|你批准了)?会议 #([1-9]\d*) /;
+function legacyMeetingId(e: { agent: string | null; text: string }) {
+  const speech = e.agent ? e.agent + " 在" : null;
+  const text = speech && e.text.startsWith(speech + "会议 #") ? e.text.slice(speech.length) : e.text;
+  return Number(LEGACY_MEETING_EVENT.exec(text)?.[1]);
+}
 // The latest activity of one run, each part read through a per-run index.
 const runActivity = (run: string) => `MAX(COALESCE(${run}.created_at, ''), COALESCE(${run}.ended_at, ''),
     COALESCE((SELECT MAX(created_at) FROM events WHERE run_id = ${run}.id), ''),
@@ -335,10 +340,7 @@ export class Store {
     if (!cols("handoffs").includes("scope_notes")) this.db.exec("ALTER TABLE handoffs ADD COLUMN scope_notes TEXT");
     if (!cols("attempts").includes("task_id")) this.db.exec("ALTER TABLE attempts ADD COLUMN task_id INTEGER");
     if (!cols("runs").includes("meeting_id")) this.db.exec("ALTER TABLE runs ADD COLUMN meeting_id INTEGER");
-    if (!cols("events").includes("meeting_id")) {
-      this.db.exec("ALTER TABLE events ADD COLUMN meeting_id INTEGER");
-      this.backfillMeetingEvents();
-    }
+    if (!cols("events").includes("meeting_id")) this.addEventMeetingIds();
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS events_run ON events (run_id, created_at);
       CREATE INDEX IF NOT EXISTS events_meeting ON events (meeting_id, created_at);
@@ -352,14 +354,18 @@ export class Store {
       WHERE COALESCE(last_parked_at, registered_at) = (SELECT MAX(COALESCE(last_parked_at, registered_at)) FROM codex_threads WHERE agent = c.agent)`);
   }
 
-  /** Once, when events gains meeting_id: link older meeting events by their text. Unrecognised rows stay NULL. */
-  private backfillMeetingEvents() {
-    const meetings = new Set(this.all<{ id: number }>("SELECT id FROM meetings").map((m) => m.id));
-    const update = this.db.prepare("UPDATE events SET meeting_id = ? WHERE id = ?");
+  /**
+   * Once: add events.meeting_id and link older meeting events by their text (unrecognised rows stay NULL).
+   * Column and backfill commit together, so an interrupted upgrade runs again on the next start.
+   */
+  private addEventMeetingIds() {
     this.db.exec("BEGIN");
     try {
-      for (const e of this.all<{ id: number; text: string }>("SELECT id, text FROM events WHERE kind = 'meeting'")) {
-        const id = Number(LEGACY_MEETING_EVENT.exec(e.text)?.[1]);
+      this.db.exec("ALTER TABLE events ADD COLUMN meeting_id INTEGER");
+      const meetings = new Set(this.all<{ id: number }>("SELECT id FROM meetings").map((m) => m.id));
+      const update = this.db.prepare("UPDATE events SET meeting_id = ? WHERE id = ?");
+      for (const e of this.all<{ id: number; agent: string | null; text: string }>("SELECT id, agent, text FROM events WHERE kind = 'meeting'")) {
+        const id = legacyMeetingId(e);
         if (meetings.has(id)) update.run(id, e.id);
       }
       this.db.exec("COMMIT");
