@@ -6,6 +6,7 @@
 // C: Codex Stop hook doorbell against fake transcripts.
 // E: codex-queue doorbell (`codex queue` via a fake CLI in an isolated CODEX_HOME): hook registers and
 //    doesn't park, mail → codex queue, dedupe against Codex's queue DB, failure → hook parks as fallback.
+// F: MCP prompts and inference, isolated CLI, drift reports and doorbell recovery.
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -16,6 +17,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { smokeCli } from "./p2-cli-smoke.js";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 7891);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -50,6 +52,8 @@ fs.writeFileSync(
   fakeCodex,
   `import fs from "node:fs";
 const dir = ${JSON.stringify(codexHome)};
+if (process.argv[2] === "--version") { console.log("codex-cli 9.1.2"); process.exit(0); }
+if (process.argv[2] === "queue" && process.argv[3] === "--help") { console.log("--thread --message"); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(fakeCodexLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 if (fs.existsSync(dir + "/fail")) { process.stderr.write("boom"); process.exit(1); }
 const i = process.argv.indexOf("--thread");
@@ -59,10 +63,10 @@ console.log("Queued message m-1 for thread " + process.argv[i + 1] + ".");
 const codexCalls = () => (fs.existsSync(fakeCodexLog) ? fs.readFileSync(fakeCodexLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : []);
 
 let daemon: ChildProcess;
-async function startDaemon() {
-  daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", proj, "--port", String(PORT)], {
+async function startDaemon(project = proj, wakeGrace = "6") {
+  daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", project, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: "6", BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
+    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -74,6 +78,7 @@ async function startDaemon() {
   throw new Error("daemon did not start:\n" + out);
 }
 async function stopDaemon() {
+  if (!daemon || daemon.exitCode !== null || daemon.signalCode !== null) return;
   const exited = new Promise((r) => daemon.once("exit", r));
   daemon.kill();
   await exited;
@@ -83,6 +88,14 @@ async function connect(name: string, transport = new StreamableHTTPClientTranspo
   const c = new Client({ name: `smoke-${name}`, version: "0.0.1" });
   await c.connect(transport);
   return c;
+}
+async function connectProxy(name: string) {
+  const client = new Client({ name, version: "0.0.1" });
+  await client.connect(new StdioClientTransport({
+    command: process.execPath, args: ["bin/bridge-mcp.mjs"],
+    env: { BRIDGE_URL: BASE, TMP: proj, TEMP: proj, TMPDIR: proj },
+  }));
+  return client;
 }
 async function call(c: Client, name: string, args: Record<string, unknown>) {
   const r: any = await c.callTool({ name, arguments: args }, undefined, { timeout: 60_000 });
@@ -106,6 +119,14 @@ function check(cond: unknown, msg: string) {
 const write = (f: string, s: string) => fs.writeFileSync(path.join(proj, f), s);
 const task = (r: any) => r.mails?.find((m: any) => m.kind === "task" && !m.void)?.task;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function waitState(predicate: (snapshot: any) => boolean, message: string) {
+  for (let i = 0; i < 100; i++) {
+    const s = await state();
+    if (predicate(s)) return s;
+    await sleep(50);
+  }
+  throw new Error(message);
+}
 const hookLog = path.join(proj, "codex-stop-hook.jsonl");
 
 function runHook(stdin: object, env: Record<string, string>): Promise<{ out: string; ms: number }> {
@@ -122,11 +143,36 @@ function runHook(stdin: object, env: Record<string, string>): Promise<{ out: str
 try {
   await startDaemon();
 
+  // Prompts and implicit join go through the stdio proxy, where the native client name reaches the daemon.
+  const nativeCodex = await connectProxy("codex-mcp-client");
+  const prompts = await nativeCodex.listPrompts();
+  const promptText = async (name: string, args?: Record<string, string>) => {
+    const { messages } = await nativeCodex.getPrompt({ name, arguments: args });
+    const message = messages[0];
+    return message?.role === "user" && message.content.type === "text" ? message.content.text : "";
+  };
+  const version = JSON.parse(fs.readFileSync("package.json", "utf8")).version;
+  check(prompts.prompts.map((p) => p.name).sort().join(",") === "inbox,join" &&
+    nativeCodex.getServerVersion()?.version === version, "stdio advertises both prompts and the package version");
+  check((await promptText("join")).includes("不填 agent_id") && (await promptText("join", { agent_id: "qbot" })).includes('agent_id = "qbot"') &&
+    (await promptText("inbox")).includes("fetch_inbox"), "prompt get returns correct user texts, with and without an explicit identity");
+  check((await call(nativeCodex, "join", {})).agent_id === "qbot" && (await state()).agents.find((a: any) => a.id === "qbot")?.product?.client === "codex-mcp-client",
+    "implicit join selects the only configured Codex product from the native proxy client name");
+  const anotherCodex = await connectProxy("codex-mcp-client");
+  const occupied = await call(anotherCodex, "join", {});
+  check(occupied.error?.includes("已被另一个会话占用") && occupied.bound_session, "implicit join preserves occupied-identity protection");
+  await anotherCodex.close();
+  await call(nativeCodex, "leave", { agent_id: "qbot" });
+  await nativeCodex.close();
+
   // ===== A: mail flow with the poll fallback =====
   console.log("— A: pipeline over mail (poll fallback)");
   let claude = await connect("claude");
   let codex = await connect("codex");
   const imposter = await connect("imposter");
+  const noMatch = await call(imposter, "join", {});
+  check(noMatch.error?.includes("没有成员") && noMatch.candidates?.includes("claude") && noMatch.candidates?.includes("codex"),
+    "implicit join with no match lists available identities");
   const j = await call(claude, "join", { agent_id: "claude" });
   check(j.roles?.length === 2 && j.doorbell === "poll", "claude joined, no doorbell → poll");
   check(
@@ -276,6 +322,8 @@ try {
   check(oldPanel.ok && (await oldPanel.text()).includes("/panel/v1/room.js") && oldScript.ok && oldStyle.ok, "meeting-room fallback still served at /v1");
   check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
   const model = await import(new URL("../panel/js/model.js", import.meta.url).href);
+  check(model.wakePhrase("claude", "claude-code") === "/bridge" && model.wakePhrase("qbot", "codex") === "$bridge" &&
+    model.wakePhrase("other").includes('agent_id="other"'), "copyable wake prompts match each product with an explicit fallback identity");
   check(JSON.stringify(model.recipients(["claude", "codex"], ["codex"], null, "@claude你好")) === '["codex","claude"]' &&
     model.recipients(["claude", "codex"], [], null, "@所有人开始").length === 2 &&
     model.recipients(["claude", "claude-review"], [], null, "@CLAUDE-REVIEW你好")[0] === "claude-review" &&
@@ -559,6 +607,9 @@ try {
   check(tools.tools.some((x) => x.name === "fetch_inbox"), "proxy lists daemon tools");
   const pj = await call(proxy as Client, "join", { agent_id: "pbot" });
   check(pj.doorbell === "claude-socket", "join through proxy registers the claude-socket doorbell");
+  const socketReport = (await state()).agents.find((a: any) => a.id === "pbot").product;
+  check(socketReport?.id === "claude-code" && socketReport.claudeSocket?.present && socketReport.claudeSocket.pipe !== false,
+    "Claude socket hint identifies the product and reports pipe presence without probing it by writing");
   await sleep(500);
   check((await state()).agents.find((a: any) => a.id === "pbot").doorbellArmed, "doorbell armed (proxy long-polling)");
   await api("/api/mail", { to: "pbot", text: "该干活了" });
@@ -697,7 +748,8 @@ try {
   const ringMail = await api("/api/mail", { to: "hbot", text: "新任务" });
   h = await parked;
   const hj = JSON.parse(h.out);
-  check(hj.decision === "block" && /fetch_inbox/.test(hj.reason) && h.ms < 5000, `mail → block with wake-up reason (${h.ms} ms)`);
+  const wakeLatency = Date.now() - rangAt;
+  check(hj.decision === "block" && /fetch_inbox/.test(hj.reason) && wakeLatency < 5000, `mail → block with wake-up reason (${wakeLatency} ms after sending)`);
   const trace = fs.readFileSync(hookLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const stdinEntry = trace.find((entry) => entry.event === "stdin" && entry.stdin.session_id === hookInput.session_id);
   const hookEvents = trace.filter((entry) => entry.pid === stdinEntry?.pid);
@@ -865,6 +917,96 @@ try {
   for (let i = 0; i < 30 && codexCalls().length === before; i++) await sleep(100);
   calls = codexCalls();
   check(h.out === "{}" && calls.length === before + 1 && calls.at(-1)![calls.at(-1)!.indexOf("--thread") + 1] === "thread-q2", "a fresh registration after the restart is woken");
+
+  // ===== F: P2 diagnostics and bounded cooldown =====
+  console.log("— F: isolated CLI, format drift and cooldown");
+  await stopDaemon();
+  const offlineProxy = await connectProxy("codex-mcp-client");
+  let offlineError = "";
+  try { await offlineProxy.listPrompts(undefined, { timeout: 5_000 }); }
+  catch (e) { offlineError = String(e); }
+  await offlineProxy.close();
+  check(offlineError.includes("无法从协作桥读取提示词") && offlineError.includes("守护进程"), "stdio explains why prompts cannot be read when the daemon is offline");
+
+  const diagnosticProject = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-diagnostics-"));
+  execFileSync("git", ["-C", diagnosticProject, "init", "-q"]);
+  fs.writeFileSync(path.join(diagnosticProject, "bridge.config.yaml"), `agents:
+  qbot: { product: codex }
+  codex_alt: { product: codex, doorbell: poll }
+pipeline:
+  - { id: implement, role: 实现, agent: qbot }
+mail: { ring_retry_seconds: 600 }
+doorbells: { cooldown_seconds: 4 }
+notify: { enabled: false }
+`);
+  await startDaemon(diagnosticProject, "0.45");
+  const diagnosticCodex = await connectProxy("codex-mcp-client");
+  const multiple = await call(diagnosticCodex, "join", {});
+  check(multiple.error?.includes("多个成员") && multiple.candidates?.join(",") === "qbot,codex_alt",
+    "implicit join returns just the product matches when more than one member matches");
+  await call(diagnosticCodex, "join", { agent_id: "qbot" });
+  const knownThread = "thread-diagnostics";
+  h = await runHook({ session_id: knownThread, transcript_path: qtx }, {});
+  check(h.out === "{}" && !(await state()).inbox.some((e: any) => e.kind === "diagnostic"),
+    "a normal Stop transcript and queue schema produce no drift");
+
+  await smokeCli(BASE, fakeCodex, check);
+  const queueStats = (snapshot: any) => snapshot.agents.find((a: any) => a.id === "qbot").doorbellStats.find((d: any) => d.kind === "codex-queue");
+  for (let i = 1; i <= 2; i++) {
+    await api("/api/mail", { to: "qbot", text: "模拟无人确认 " + i });
+    s = await waitState((snapshot) => queueStats(snapshot).failed === i, "did not observe sequential wake timeout " + i);
+    check(!queueStats(s).degradedUntil, "queue remains eligible after timeout " + i);
+  }
+  const cooldownHook = fetch(BASE + "/api/doorbell/wait?agent=qbot&kind=codex-hook&timeout=8").then((r) => r.json());
+  // A direct parked hook is registered immediately; give the loopback request time to reach the daemon.
+  await sleep(200);
+  const third = await api("/api/mail", { to: "qbot", text: "第三次无人确认，改用 Stop hook" });
+  const fallbackRing = await cooldownHook;
+  s = await waitState((snapshot) => !!queueStats(snapshot).degradedUntil, "queue did not enter cooldown");
+  check(fallbackRing.mailIds?.includes(third.json.id) && queueStats(s).rings === 3 && queueStats(s).failed === 3 &&
+    queueStats(s).confirmed === 0 && queueStats(s).consecutiveFailures === 3 &&
+    s.events.filter((e: any) => e.kind === "doorbell_degraded").length === 1 &&
+    activity(s, "qbot")?.evidence.includes("连续 3 次唤醒未确认"),
+    "three unconfirmed rings degrade only the queue and fall through to the parked hook with the expected evidence");
+  await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
+  s = await waitState((snapshot) => !queueStats(snapshot).degradedUntil, "queue did not recover after cooldown");
+  check(queueStats(s).consecutiveFailures === 0 && s.events.filter((e: any) => e.kind === "doorbell_recovered").length === 1,
+    "one recovery event re-enables the queue and resets its failure streak");
+  const recoveredMail = await api("/api/mail", { to: "qbot", text: "恢复后的信" });
+  await waitState((snapshot) => queueStats(snapshot).rings === 4, "queue did not ring again after recovery");
+  check((await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" })).mails.some((m: any) => m.id === recoveredMail.json.id),
+    "the restored queue delivers a new wake");
+  s = await waitState((snapshot) => queueStats(snapshot).confirmed === 1, "resumed ring was not confirmed by a tool call");
+  check(queueStats(s).rings === 4 && queueStats(s).failed === 3 && !inboxItem(s, "diagnostic"),
+    "wake statistics preserve confirmed and failed totals with a healthy format");
+
+  const driftTranscript = path.join(diagnosticProject, "rollout-changed.jsonl");
+  fs.writeFileSync(driftTranscript, [
+    { type: "session_meta", payload: { cli_version: "9.3.0" } },
+    { payload: { item: { type: "RenamedMcpToolCall", server: "bridge", tool: "join", status: "completed" } } },
+  ].map((line) => JSON.stringify(line)).join("\n"));
+  const noRingBefore = codexCalls().length;
+  h = await runHook({ session_id: knownThread, transcript_path: driftTranscript }, {});
+  s = await state();
+  const transcriptItem = inboxItem(s, "diagnostic", "qbot");
+  check(h.out === "{}" && codexCalls().length === noRingBefore && transcriptItem?.urgency === "normal" &&
+    inboxContext(s, transcriptItem)?.version === "9.3.0" && s.events.some((e: any) => e.kind === "drift" && e.text.includes("9.3.0")),
+    "broken transcript reports a versioned diagnostic card and does not wake or register a thread");
+
+  const changedDb = new DatabaseSync(path.join(codexHome, "queue_1.sqlite"));
+  changedDb.exec("ALTER TABLE queued_items RENAME TO incompatible_items");
+  changedDb.close();
+  for (let i = 0; i < 2; i++) {
+    await api("/api/mail", { to: "qbot", text: "格式变化时仍可用队列投递 " + i });
+    await waitState((snapshot) => queueStats(snapshot).rings === 5 + i, "schema drift interrupted queue fallback");
+    await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
+  }
+  s = await waitState((snapshot) => snapshot.timeline.some((it: any) => it.source === "codex-queue"), "no queue schema warning");
+  check(s.inbox.filter((it: any) => it.kind === "diagnostic").length === 2 &&
+    s.events.filter((e: any) => e.kind === "drift" && e.text.includes("队列数据库")).length === 1 &&
+    s.agents.find((a: any) => a.id === "qbot").diagnostics.length === 2,
+    "changed queue schema falls back to enqueue, with a single per-daemon drift event and member diagnostics");
+  await diagnosticCodex.close();
 } catch (e) {
   console.error(e);
   failed = true;

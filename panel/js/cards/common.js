@@ -17,3 +17,9 @@ export function timeTag(iso) {
 export function label(text, style = "") {
   return '<span class="status-label ' + esc(style) + '">' + esc(text) + "</span>";
 }
+
+export function copyWakeButton(phrase) {
+  return '<div class="wake-copy"><button type="button" class="button" data-act="copyWake" data-wake="' +
+    esc(phrase) + '">复制叫醒语</button><span class="muted" data-copy-status role="status"></span>' +
+    '<input type="text" readonly hidden aria-label="叫醒语"></div>';
+}

@@ -40,7 +40,7 @@ button, input, textarea { font: inherit; }
 button { color: inherit; cursor: pointer; }
 button:disabled { cursor: wait; opacity: .55; }
 :focus-visible { outline: 2px solid #258061; outline-offset: 3px; }
-textarea, input:not([type]) {
+textarea, input:not([type]), .wake-copy input {
   display: block;
   width: 100%;
   min-width: 0;
@@ -200,6 +200,7 @@ details > summary { padding: 5px 0; color: var(--accent-dark); font-weight: 650;
 .detail-body ul, ul.detail-body { padding-left: 20px; }
 .detail-body > li + li { margin-top: 6px; }
 .card-link { margin-top: 9px; font-size: .88rem; }
+.wake-copy { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 
 .meeting-header .row-heading h2 { font-size: clamp(1.25rem, 3vw, 1.65rem); }
 .participant { display: inline-flex; align-items: center; min-width: 0; gap: 5px; overflow-wrap: anywhere; }

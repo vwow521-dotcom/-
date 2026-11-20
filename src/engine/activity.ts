@@ -34,8 +34,9 @@ export function activityFor(input: {
   template: Stage[];
   meeting?: { meeting: Meeting; invitedAt: string | null };
   delivery?: DeliveryNotice;
+  failedWake?: string;
 }): Activity {
-  const { id, status, lastSeen, attempts, tasks, handoffs, template, meeting, delivery } = input;
+  const { id, status, lastSeen, attempts, tasks, handoffs, template, meeting, delivery, failedWake } = input;
   const member: PanelTarget = { view: "office", anchor: `member-${id}` };
   const taskLabel = (a: Attempt) => {
     const task = tasks.find((t) => t.id === a.task_id);
@@ -49,7 +50,7 @@ export function activityFor(input: {
   });
 
   if (delivery?.reason === "stuck" || delivery?.reason === "unanswered")
-    return result("unreachable", delivery.title, delivery.at);
+    return result("unreachable", failedWake ? delivery.title + "。" + failedWake : delivery.title, delivery.at);
   if (status === "never-joined") return result(status, "本次守护进程启动后还没有工具调用记录", null);
   if (status === "offline") return result(status, "在线状态已失效，依据 MCP 绑定和最近一次活动判断", lastSeen);
   if (status === "stale") return result(status, "超过在线状态的活动间隔，正在等待连接恢复", lastSeen);

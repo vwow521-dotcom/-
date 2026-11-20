@@ -1,11 +1,13 @@
 // Session bindings and each agent's in-memory presence.
 import type { Doorbells, DoorbellKind } from "../doorbells/index.js";
+import type { BridgeClient } from "../products/types.js";
 import { err, type EngineContext, type Result } from "./context.js";
 
 export type PresenceStatus = "working" | "armed" | "waiting" | "idle" | "stale" | "offline" | "never-joined";
 
 interface AgentPresence {
   id: string;
+  client?: BridgeClient & { reportedAt: string };
   sessionId?: string; // the one MCP session allowed to act as this agent
   canRecover?: boolean; // set only when the bound MCP session closes
   boundAt?: number;
@@ -95,7 +97,10 @@ export class Presence {
   }
 
   private bind(p: AgentPresence, sessionId: string | undefined) {
-    if (p.sessionId !== sessionId) p.boundAt = Date.now();
+    if (p.sessionId !== sessionId) {
+      p.boundAt = Date.now();
+      p.client = undefined;
+    }
     p.sessionId = sessionId;
     p.canRecover = false;
     p.lastSeenAt = Date.now();
@@ -124,7 +129,7 @@ export class Presence {
     return true;
   }
 
-  join(agent: string, sessionId: string | undefined, takeover = false, doorbellHint?: string, recovery?: { key: string; replay: boolean }): Result {
+  join(agent: string, sessionId: string | undefined, takeover = false, doorbellHint?: string, recovery?: { key: string; replay: boolean }, client?: BridgeClient): Result {
     const p = this.agents.get(agent);
     if (!p) return err(`未知 agent_id，可选：${this.agentIds().join(", ")}`);
     if (recovery?.replay && (!takeover || this.ctx.store.resumeKey(agent) !== recovery.key))
@@ -156,6 +161,7 @@ export class Presence {
     }
     this.bind(p, sessionId);
     this.applyDoorbellHint(p, doorbellHint ?? (sessionId ? this.sessionDoorbell.get(sessionId) : undefined));
+    if (client) p.client = { ...client, reportedAt: new Date().toISOString() };
     const bell = this.doorbells.primary(agent);
     const kind = bell.kind;
     this.ctx.log("join", { agent, session: sessionId, doorbell: kind, chain: this.doorbells.chain(agent), recovered: recovery?.replay || undefined });

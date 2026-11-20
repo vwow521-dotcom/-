@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { readCodexTranscript } from "./codex-transcript.mjs";
 
 const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:7878").replace(/\/$/, "");
 const PARK_MS = Number(process.env.BRIDGE_PARK_SECONDS ?? 600) * 1000;
@@ -34,28 +35,6 @@ function log(event, data) {
     fs.mkdirSync(path.dirname(LOG), { recursive: true });
     fs.appendFileSync(LOG, JSON.stringify({ t: new Date().toISOString(), pid: process.pid, event, ...data }) + "\n");
   } catch {} // diagnostics must not interfere with the hook protocol
-}
-
-/** Last agent_id this thread successfully joined as, or null. */
-function joinedAgent(transcriptPath) {
-  if (typeof transcriptPath !== "string") return null;
-  let text;
-  try {
-    text = fs.readFileSync(transcriptPath, "utf8");
-  } catch {
-    return null;
-  }
-  let agent = null;
-  for (const line of text.split("\n")) {
-    if (!line.includes('"McpToolCall"') || !line.includes('"join"')) continue;
-    try {
-      const item = JSON.parse(line).payload?.item;
-      if (item?.type !== "McpToolCall" || item.server !== SERVER || item.tool !== "join" || item.status !== "completed") continue;
-      const r = JSON.parse(item.result?.content?.[0]?.text ?? "{}");
-      if (r.agent_id && !r.error) agent = r.agent_id;
-    } catch {}
-  }
-  return agent;
 }
 
 /** Tell the bridge this conversation's id. Returns whether to park as the doorbell (old bridges: always). */
@@ -83,7 +62,8 @@ process.stdin.once("end", async () => {
   log("stdin", { stdin: stdin === undefined ? input : stdin });
   const ev = stdin ?? {};
   const context = { session_id: ev.session_id, turn_id: ev.turn_id, stop_hook_active: ev.stop_hook_active };
-  const agent = joinedAgent(ev.transcript_path);
+  const transcript = readCodexTranscript(ev.transcript_path, SERVER);
+  const agent = transcript.agent;
   let parkStarted = null;
   const out = (output, cause, mailIds) => {
     const data = { ...context, agent, cause, mailIds, parked_ms: parkStarted === null ? 0 : Math.round(performance.now() - parkStarted), output };
@@ -94,7 +74,19 @@ process.stdin.once("end", async () => {
       process.exit(error ? 1 : 0);
     });
   };
-  if (!agent) return out({}, "not_joined");
+  if (!agent) {
+    if (transcript.drift) {
+      log("transcript_drift", { version: transcript.version });
+      await fetch(BASE + "/api/diagnostics/codex-transcript", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session_id: ev.session_id, version: transcript.version }),
+        signal: AbortSignal.timeout(1500),
+      }).catch(() => {});
+      return out({}, "transcript_drift");
+    }
+    return out({}, "not_joined");
+  }
 
   // The daemon may be restarting: tolerate it being unreachable for up to DOWN_GRACE_MS in a row.
   let downSince = null;

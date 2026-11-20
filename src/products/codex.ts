@@ -1,13 +1,14 @@
 // Codex's MCP configuration and user-level Stop hook, including legacy project hook cleanup.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { findCodexCommand } from "../doorbells/codex-queue.js";
+import { codexHome, detectCodexVersion, findCodexCommand } from "./codex-runtime.js";
+import { doctorSkill, setupSkill, uninstallSkill } from "./skills.js";
 import type { ProductCli, ProductProfile } from "./types.js";
 
-const CODEX_DIR = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
+const CODEX_DIR = codexHome();
 const CODEX_TOML = path.join(CODEX_DIR, "config.toml");
 const CODEX_HOOKS = path.join(CODEX_DIR, "hooks.json");
+const skill = { product: "codex" as const, label: "Codex", target: CODEX_DIR };
 
 const fwd = (p: string) => p.replace(/\\/g, "/");
 const quoteIfSpace = (p: string) => (/\s/.test(p) ? `"${p}"` : p);
@@ -28,23 +29,34 @@ function tomlSplit(text: string) {
 function codexBlock(eol: string, { node, proxy }: ProductCli) {
   return ["[mcp_servers.bridge]", `command = '${node}'`, `args = ['${proxy}']`, "tool_timeout_sec = 120", ""].join(eol);
 }
+const ownsMcpBlock = (block: string, port: number) => block.includes("bridge-mcp.mjs") || block.includes("127.0.0.1:" + port);
+
 function codexMcpSetup(cli: ProductCli) {
   const { refresh, port, info, ok, bad, writeFile } = cli;
   const text = fs.existsSync(CODEX_TOML) ? fs.readFileSync(CODEX_TOML, "utf8") : "";
   const { eol, lines, start, end, block } = tomlSplit(text);
-  if (refresh && start < 0) return info("Codex：没有配置 bridge，跳过（要加上就运行 ai-bridge setup）");
+  if (refresh && start < 0) {
+    info("Codex：没有配置 bridge，跳过（要加上就运行 ai-bridge setup）");
+    return false;
+  }
   const want = codexBlock(eol, cli);
-  if (start >= 0 && block.trim() === want.trim().replace(/\r\n/g, "\n")) return ok("Codex：bridge 已是最新配置");
-  if (start >= 0 && !block.includes("bridge-mcp.mjs") && !block.includes(`127.0.0.1:${port}`))
-    return bad("Codex：已有一个不是协作桥的 [mcp_servers.bridge]，没有覆盖，请手动检查 config.toml");
+  if (start >= 0 && block.trim() === want.trim().replace(/\r\n/g, "\n")) {
+    ok("Codex：bridge 已是最新配置");
+    return true;
+  }
+  if (start >= 0 && !ownsMcpBlock(block, port)) {
+    bad("Codex：已有一个不是协作桥的 [mcp_servers.bridge]，没有覆盖，请手动检查 config.toml");
+    return false;
+  }
   const rest = start >= 0 ? [...lines.slice(0, start), ...lines.slice(end)] : lines;
   while (rest.length && rest[rest.length - 1].trim() === "") rest.pop();
   writeFile(CODEX_TOML, rest.join(eol) + eol + eol + want, "Codex MCP 配置（stdio 转接程序）");
+  return true;
 }
 function codexMcpUninstall({ port, info, writeFile }: ProductCli) {
   if (!fs.existsSync(CODEX_TOML)) return info("Codex：没有 config.toml");
   const { eol, lines, start, end, block } = tomlSplit(fs.readFileSync(CODEX_TOML, "utf8"));
-  if (start < 0 || (!block.includes("bridge-mcp.mjs") && !block.includes(`127.0.0.1:${port}`))) return info("Codex：没有协作桥的 MCP 配置");
+  if (start < 0 || !ownsMcpBlock(block, port)) return info("Codex：没有协作桥的 MCP 配置");
   const rest = [...lines.slice(0, start), ...lines.slice(end)];
   writeFile(CODEX_TOML, rest.join(eol), "移除 Codex 的 bridge 配置");
 }
@@ -131,12 +143,13 @@ function cleanupLegacyProjectHooks({ project, info, removeFile, writeFile }: Pro
 }
 
 function setup(cli: ProductCli) {
-  codexMcpSetup(cli);
+  if (codexMcpSetup(cli)) setupSkill(cli, skill);
   codexHookSetup(cli);
   cleanupLegacyProjectHooks(cli);
 }
 
 function uninstall(cli: ProductCli) {
+  uninstallSkill(cli, skill);
   codexMcpUninstall(cli);
   codexHookUninstall(cli);
   cleanupLegacyProjectHooks(cli);
@@ -148,6 +161,7 @@ function doctor(cli: ProductCli) {
   if (block.includes(proxy)) ok("Codex：bridge 指向本安装的转接程序");
   else if (block) bad("Codex：bridge 指向别处 → 运行 ai-bridge setup");
   else info("Codex：没有配置 bridge（不用 Codex 就忽略；要用就运行 ai-bridge setup）");
+  doctorSkill(cli, skill, ownsMcpBlock(block, cli.port));
 
   let hookOk = false;
   if (!block) {
@@ -183,7 +197,11 @@ function doctor(cli: ProductCli) {
 
 export const codex: ProductProfile = {
   ids: ["codex"],
+  label: "Codex CLI",
+  clientNames: ["codex-mcp-client", "codex"],
   doorbells: ["codex-queue", "codex-hook", "poll"],
+  verifiedVersions: ["0.170"],
+  detectVersion: detectCodexVersion,
   setupHint: "在 Codex 的 Settings > Hooks（或输入框旁的 Review hooks）里信任新的 Stop hook。",
   setup,
   uninstall,

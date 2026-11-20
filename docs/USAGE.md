@@ -47,7 +47,13 @@ ai-bridge start E:\某项目    # 启动桥，面板 http://127.0.0.1:7878/
 - 重启桥只需关掉终端再 `ai-bridge start` 一次。Claude 由转接程序自动重连；正在停靠的 Codex 会在 90 秒内反复重连，不会被放走。
 - 同一个 Claude 会话重启转接程序时，会按消息套接字恢复上次的身份和门铃。普通 MCP 连接因会话关闭而解绑时，下次工具调用会恢复身份并附上一条说明。面板「释放」或调用 `leave` 后，需要明确调用 `join` 才能再次加入。
 
-## 3. 启动提示词
+## 3. 加入协作桥
+
+已安装 `bridge` skill 时，Claude Code 输入 `/bridge`，Codex 输入 `$bridge` 或从 `/skills` 选择 `bridge`。两边的 skill 都由用户显式调用。Claude 桌面版 Code 标签页、Codex 桌面版的命令列表和触发行为待验证。 [Claude Code 技能](https://code.claude.com/docs/en/skills#control-who-invokes-a-skill) [Codex 技能与调用策略](https://learn.chatgpt.com/docs/build-skills#optional-metadata)
+
+客户端支持 MCP 提示词时，可以选择 bridge 的 `join` 或 `inbox`。Claude Code 可用 `/mcp__bridge__join` 或 `/mcp__bridge__inbox`，桌面版的显示情况待验证。`join` 根据客户端产品匹配配置中的成员。只有一个匹配时自动填身份，多个或零个匹配时请按候选明确指定。 [Claude Code MCP 提示词](https://code.claude.com/docs/en/mcp#use-mcp-prompts-as-commands)
+
+`ai-bridge setup` 配置两种客户端并安装 skill。`setup --refresh` 只更新已有的托管文件，保留用户主动移除的 MCP 配置。从 0.7 升级后若尚未安装 skill，可继续使用下面的提示词。需要同时配置两个客户端时可显式运行 `setup`。
 
 Claude：
 
@@ -117,6 +123,10 @@ Codex 第一次加入后，要等它结束一轮，hook 才能登记它的对话
 | 门铃一栏显示红字错误 | Claude 消息注入失败，比如 Claude 更新后接口变了 | 信件会重新投递；一直失败的话，在 Claude 里说「改用 wait_for_mail 等信」 |
 | AI 说"身份已被另一个会话占用" | 同一个身份开了两个会话，或旧会话还没超时 | 打开成员详情并点「释放身份」，再让新会话 join。也可以在新会话里说"用 takeover=true 重新 join"。它的回复里会写明旧会话空闲了多久、多久后自动释放 |
 | 不确定配置对不对 | — | `ai-bridge doctor` |
+
+升级 Claude 或 Codex 后，可用 `ai-bridge doctor --probe` 检查 Codex 队列命令的帮助、SQLite 表和会话记录格式，以及当前守护进程收到的 Claude 套接字报告。探针只读。待办中出现「格式可能变了」时，可用同一命令复核。待办和成员详情的「复制叫醒语」优先给相应产品的快捷命令，剪贴板不可用时可以手动复制选中的文字。
+
+`doctor` 会显示已安装的 skill 和产品版本。未验证的产品版本仍可以使用原有门铃。安装版本确认落后于 GitHub main 时，`doctor` 才提示更新。
 
 ## 7. 卸载 / 重装
 

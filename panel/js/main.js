@@ -100,6 +100,21 @@ const local = {
   target(button) { composer.target(button.dataset.agent); },
   reply(button) { composer.replyTo(Number(button.dataset.id), button.dataset.agent); },
   unreply() { composer.unreply(); },
+  async copyWake(button) {
+    const status = $("[data-copy-status]", button.parentElement);
+    const fallback = $("input", button.parentElement);
+    try {
+      await navigator.clipboard.writeText(button.dataset.wake);
+      fallback.hidden = true;
+      status.textContent = "已复制";
+    } catch {
+      fallback.value = button.dataset.wake;
+      fallback.hidden = false;
+      fallback.focus();
+      fallback.select();
+      status.textContent = "已选中，请手动复制";
+    }
+  },
 };
 
 document.addEventListener("input", (event) => {
@@ -163,7 +178,8 @@ state.subscribe((s) => ({
   jumpToAnchor();
 });
 state.subscribe((s) => ({
-  agents: s.agents.map(({ id, activity }) => ({ id, activity })),
+  agents: s.agents.map(({ id, activity, diagnostics }) => ({ id, activity, hasDiagnosis: diagnostics?.length > 0 })),
+  diagnoses: s.timeline.filter((it) => it.type === "diagnostic" && !it.agent),
   meeting: s.meeting && { id: s.meeting.id, round: s.meeting.round, status: s.meeting.status, topic: s.meeting.topic, participants: s.meeting.participants },
   approvals: s.inbox.filter((it) => it.kind === "handoff_gate" || it.kind === "meeting_final").length,
 }), (data) => {
@@ -172,7 +188,8 @@ state.subscribe((s) => ({
 });
 state.subscribe((s) => ({
   inbox: s.inbox, ids: ids(s),
-  contexts: s.timeline.filter((it) => it.type === "delivery" || it.type === "question" ||
+  products: Object.fromEntries(s.agents.map((agent) => [agent.id, agent.product?.id])),
+  contexts: s.timeline.filter((it) => it.type === "delivery" || it.type === "diagnostic" || it.type === "question" ||
     (it.type === "round" && ["review", "awaiting_approval"].includes(it.status)) || (it.type === "handoff" && it.gate)),
 }), renderInbox);
 state.subscribe((s) => ({

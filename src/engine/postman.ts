@@ -1,6 +1,6 @@
 // Deliver mail, ring doorbells and retry unread deliveries.
 import { randomUUID } from "node:crypto";
-import { CODEX_THREAD, type Doorbell, type Doorbells, type DoorbellKind, type RingResult } from "../doorbells/index.js";
+import { CODEX_THREAD, type Doorbell, type Doorbells, type DoorbellKind, type RingOutcome, type RingResult } from "../doorbells/index.js";
 import type { Mail, MailKind } from "../store.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import type { Presence } from "./presence.js";
@@ -16,6 +16,8 @@ const UNREACHABLE_ALERT_MS = Number(process.env.BRIDGE_UNREACHABLE_ALERT_SECONDS
 export class Postman {
   private readonly wakeAlerts = new Set<string>(); // mail IDs already reported to the human as "rang, no response"
   private readonly mailWakers = new Map<string, () => void>();
+  // In-process parked-hook delivery and its scheduled verification share the same mail ID array.
+  private readonly verifications = new WeakMap<string[], { counted: boolean; disconnected: boolean }>();
 
   constructor(
     private readonly ctx: EngineContext,
@@ -77,7 +79,7 @@ export class Postman {
       const chain = this.doorbells.chain(agent);
       const q = chain.indexOf("codex-queue");
       const h = chain.indexOf("codex-hook");
-      park = !(q >= 0 && (h < 0 || q < h) && this.doorbells.codexQueue.available(agent));
+      park = !(q >= 0 && (h < 0 || q < h) && this.doorbells.available(agent, "codex-queue"));
     }
     this.ctx.onChange();
     if (!park) this.kick(agent); // mail that arrived while the agent was mid-turn
@@ -87,11 +89,19 @@ export class Postman {
   /** The proxy reports whether writing to the Claude messaging socket worked. */
   doorbellResult(agent: string, mailIds: string[], ok: boolean, error?: string, kind: "claude-socket" | "codex-hook" = "claude-socket") {
     const p = this.presence.get(agent)!;
+    const bell = this.doorbells.get(kind);
     if (ok) {
       p.doorbellError = undefined;
+      if (!bell.verify) this.doorbells.recordResult(agent, bell, "delivered");
       return;
     }
-    this.ringFailed(agent, this.doorbells.get(kind), mailIds, error ?? "未知原因", new Set([kind]));
+    const verification = this.verifications.get(mailIds);
+    if (verification) {
+      if (verification.disconnected) return;
+      verification.disconnected = true;
+      if (!verification.counted) this.doorbells.recordRing(agent, bell);
+    }
+    this.ringFailed(agent, bell, mailIds, error ?? "未知原因", new Set([kind]));
   }
 
   sendMail(m: { id?: string; run_id?: number | null; attempt_id?: number | null; from: string; to: string; kind: MailKind; subject: string; body: string; importance?: "normal" | "high"; ack_required?: boolean }) {
@@ -147,22 +157,33 @@ export class Postman {
     this.ctx.log("doorbell_ring", { agent, via: bell.kind, mails: ids });
     this.ctx.event(null, agent, "doorbell", `按门铃叫醒 ${agent}（${bell.label}，${queued.length} 封信）`);
     const nowTried = new Set([...tried, bell.kind]);
+    const verification = bell.verify ? { counted: false, disconnected: false } : undefined;
+    if (verification) this.verifications.set(ids, verification);
     bell
       .ring({ agent, mailIds: ids, text })
-      .catch((e): { ok: false; error: string } => ({ ok: false, error: String(e?.message ?? e) }))
+      .catch((e): RingOutcome => ({ ok: false, error: String(e?.message ?? e) }))
       .then((o) => {
+        if (verification?.disconnected) return;
+        const measured = !o.ok || !o.reused;
+        if (measured) {
+          if (verification) verification.counted = true;
+          this.doorbells.recordRing(agent, bell);
+        }
         if (o.ok) {
           if (o.note) this.ctx.log("doorbell_note", { agent, via: bell.kind, note: o.note });
-          if (bell.verify) setTimeout(() => this.checkWake(agent, bell, ids, rangAt, nowTried), WAKE_GRACE_MS).unref();
+          if (verification) setTimeout(() => {
+            if (!verification.disconnected) this.checkWake(agent, bell, ids, rangAt, nowTried, measured);
+          }, WAKE_GRACE_MS).unref();
           return;
         }
-        this.ringFailed(agent, bell, ids, o.error, nowTried);
+        this.ringFailed(agent, bell, ids, o.error, nowTried, o.cooldown);
       });
   }
 
   /** A ring didn't go through: put the mail back and try the next doorbell in the chain. */
-  private ringFailed(agent: string, bell: Doorbell, ids: string[], error: string, tried: ReadonlySet<DoorbellKind>) {
+  private ringFailed(agent: string, bell: Doorbell, ids: string[], error: string, tried: ReadonlySet<DoorbellKind>, cooldown = false) {
     const p = this.presence.get(agent)!;
+    this.doorbells.recordResult(agent, bell, "failed", cooldown);
     p.doorbellError = `${bell.label}：${error}`;
     this.ctx.log("doorbell_failed", { agent, via: bell.kind, error });
     this.ctx.event(null, agent, "doorbell", `${agent} 的门铃（${bell.label}）失败：${error}，信件会重新投递`);
@@ -188,23 +209,28 @@ export class Postman {
    * already busy on a bridge task reads its mail when it gets to it. Otherwise try the next doorbell, and
    * when none is left, ask the human.
    */
-  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, tried: ReadonlySet<DoorbellKind>) {
-    if ((this.presence.get(agent)?.lastSeenAt ?? 0) >= rangAt) return;
-    if (this.isBusy(agent)) return;
+  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, tried: ReadonlySet<DoorbellKind>, measured: boolean) {
+    if ((this.presence.get(agent)?.lastSeenAt ?? 0) >= rangAt || this.isBusy(agent)) {
+      if (measured) this.doorbells.recordResult(agent, bell, "confirmed");
+      return;
+    }
     const unread = ids.filter((id) => {
       const st = this.ctx.store.mail(id)?.status;
-      return (st === "rung" || st === "queued") && !this.wakeAlerts.has(id);
+      return st === "rung" || st === "queued";
     });
     if (!unread.length) return;
-    this.ctx.log("wake_timeout", { agent, via: bell.kind, mails: unread, graceMs: WAKE_GRACE_MS });
+    if (measured) this.doorbells.recordResult(agent, bell, "timeout");
+    const unreported = unread.filter((id) => !this.wakeAlerts.has(id));
+    if (!unreported.length) return;
+    this.ctx.log("wake_timeout", { agent, via: bell.kind, mails: unreported, graceMs: WAKE_GRACE_MS });
     const next = this.doorbells.pick(agent, tried);
     if (next) {
       this.ctx.event(null, agent, "doorbell", `${agent} 对「${bell.label}」没有反应，改用「${next.label}」`);
-      this.ctx.store.setMailStatus(unread.filter((id) => this.ctx.store.mail(id)?.status === "rung"), "queued");
+      this.ctx.store.setMailStatus(unreported.filter((id) => this.ctx.store.mail(id)?.status === "rung"), "queued");
       this.kick(agent, tried);
       return;
     }
-    this.alertUnanswered(agent, bell, unread);
+    this.alertUnanswered(agent, bell, unreported);
     this.ctx.onChange();
   }
 

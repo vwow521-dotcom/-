@@ -11,6 +11,7 @@ import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
 import { Engine } from "./engine.js";
 import { buildServer } from "./mcp.js";
+import type { BridgeClient } from "./products/types.js";
 import { isRepo, dirtyFiles, show } from "./git.js";
 import { PANEL_HTML } from "./panel.js";
 import { toast } from "./notify.js";
@@ -55,12 +56,20 @@ app.post("/mcp", async (req, res) => {
       res.status(sid ? 404 : 400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Unknown or missing session" }, id: null });
       return;
     }
+    const socket = req.header("x-bridge-claude-socket");
+    const pipe = req.header("x-bridge-claude-pipe");
+    const client: BridgeClient = {
+      name: req.header("x-bridge-client")?.slice(0, 160) ?? String(req.body.params.clientInfo?.name ?? "").slice(0, 160),
+      claudeSocket: socket === "present" || socket === "absent"
+        ? { present: socket === "present", pipe: pipe === "present" ? true : pipe === "absent" ? false : null }
+        : req.header("x-bridge-doorbell") === "claude-socket" ? { present: true, pipe: null } : undefined,
+    };
     const t = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         transports.set(id, t);
         engine.presence.setSessionDoorbell(id, req.header("x-bridge-doorbell"));
-        engine.context.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo });
+        engine.context.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo, upstream_client: client.name });
       },
     });
     t.onclose = () => {
@@ -69,7 +78,7 @@ app.post("/mcp", async (req, res) => {
       engine.context.log("mcp_session_close", { session: t.sessionId });
       engine.presence.sessionClosed(t.sessionId);
     };
-    await buildServer(engine).connect(t);
+    await buildServer(engine, client).connect(t);
     transport = t;
   }
   await transport.handleRequest(req, res, req.body);
@@ -201,6 +210,14 @@ app.post("/api/doorbell/result", (req, res) => {
 // (kind "codex-thread") at the end of every turn; the answer tells it whether to park as the doorbell.
 app.post("/api/agents/:id/endpoint", (req, res) => {
   reply(res, engine.postman.registerEndpoint(req.params.id, String(req.body?.kind ?? ""), String(req.body?.address ?? "")));
+});
+// A Stop hook with evidence of a drifted join format can report it without registering a thread.
+app.post("/api/diagnostics/codex-transcript", async (req, res) => {
+  const thread = req.body?.session_id;
+  if (typeof thread !== "string" || !/^[\w-]{1,160}$/.test(thread))
+    return void res.status(400).json({ error: "session_id 无效" });
+  await engine.diagnostics.transcriptDrift(thread, req.body?.version);
+  res.json({ ok: true });
 });
 // Pre-0.5 hooks.
 app.post("/api/codex/thread", (req, res) => {

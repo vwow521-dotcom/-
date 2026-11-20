@@ -344,3 +344,14 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
 - **静态模块**。`panel/index.html` 加载 `app.css` 和 `js/main.js`。`state.js` 从 `/api/stream` 的 SSE 提示刷新 `/api/state`，每 5 秒兜底，并按订阅区域比较快照。`router.js` 用 `#/chat`、`#/meeting`、`#/office` 与 `anchor` 参数定位卡片。`model.js` 投影数据，`cards/` 在视图和 `inbox.js` 间复用卡片。视图在本页内保持 DOM、滚动与展开状态，`data-keep` 让同一审批或问题在两处共享草稿。`actions.js` 通过原有 POST 接口提交，提供就地错误反馈和停止、取消、释放等动作的确认。
 - **直达与滚动**。三个视图起初均隐藏，路由从地址栏选择唯一的视图。可直接打开并刷新 `/#/meeting` 或 `/#/office`，确认内容和导航一致。Chat 首次显示时跟随最新消息，明确指定的锚点优先，回来时恢复已保存的滚动位置。
 
+## 21. P2 一键加入和门铃加固
+
+本机 Codex 0.171.0 已在临时用户目录通过 `skills/list` 识别 `~/.codex/skills/bridge`。实际桌面会话的命令菜单、调用和叫醒在安装后验收。
+
+- **加入与取信**。MCP 公开 `join` 和 `inbox` 两个提示词，stdio 转接程序转发 `prompts/list` 与 `prompts/get`，两侧握手版本取 `package.json`。省略 `agent_id` 时按 `agents.*.product` 找唯一匹配，歧义或无匹配时返回候选，沿用原会话绑定与显式接管机制。转接程序以 `x-bridge-client` 转发下游初始化名称，直接连接可用自己的 `clientInfo.name`，Claude 套接字变量优先作为产品线索。用隔离配置让本机 Claude Code 2.1.326 和 Codex 0.171.0 连接开发守护进程，其 `mcp_session_open` 日志中的 `upstream_client` 分别为 `claude-code` 和 `codex-mcp-client`。 [MCP 提示词规范](https://modelcontextprotocol.io/specification/2025-11-25/server/prompts)
+- **Skill 生命周期**。`setup` 安装 `~/.claude/skills/bridge/SKILL.md` 和 `~/.codex/skills/bridge/SKILL.md`。Claude 用 `disable-model-invocation`，Codex 用 `agents/openai.yaml` 的 `allow_implicit_invocation` 控制为显式调用。按文件所有权标记识别，更新和卸载前备份。`--refresh` 要求对应 bridge MCP 和托管 skill 已存在，只刷新已有托管文件。 [Claude Code 调用控制](https://code.claude.com/docs/en/skills#control-who-invokes-a-skill) [Codex 调用策略](https://learn.chatgpt.com/docs/build-skills#optional-metadata)
+- **版本提示与探针**。`agents[].product` 提供版本、提示和代理报告。Codex 优先从所选 release 目录取版本，其他命令用 `--version`。Windows Claude 从本用户安装的 AppX 包读版本，取不到时为 `unknown`。已确认的 Codex 门铃版本前缀为 `0.170`。本机 `0.171.0` 的 release 在 run #1 期间才出现，而队列门铃会缓存已经选中的命令，因此旧运行的成功记录不足以确认该版本。`doctor --probe` 仅读命令帮助、SQLite、最近的 Codex 会话记录和 `/api/state` 的代理报告。Claude 代理报告套接字变量与管道存在性，检查阶段只查看管道目录，无需连接管道。
+- **格式变化**。Stop hook 和探针共用 `bin/codex-transcript.mjs`。仅根据结构化工具记录判断 join 痕迹。无法识别时，hook 向本机 `POST /api/diagnostics/codex-transcript` 报告，服务端优先按已有线程端点关联成员，其次选唯一 Codex 成员，其余显示产品级诊断。队列数据库存在但读取失败时每个守护进程记一次 `drift`，队列投递沿用原路径。运行中的诊断进入成员详情与 `inbox`（`kind: diagnostic`，普通优先级）。`drift` 事件含产品与版本，活跃提示与统计从守护进程启动开始累计。
+- **唤醒统计与降级**。`Doorbells` 注册表按成员和驱动记录响铃、确认与失败，快照提供 `agents[].doorbellStats`。使用已有队列唤醒的去重请求不计新响铃。可验证门铃以宽限期内的工具调用或成员正在工作作为确认信号。连续 `doorbells.max_unconfirmed_rings` 次未确认（默认 3）后，跳过该成员的该门铃 `doorbells.cooldown_seconds` 秒（默认 600），由原顺序选择可用的下一个门铃。现有队列执行失败仍立即触发降级，走同一注册表。发生降级和恢复时各记一次事件，恢复后重试仍排队的信。Claude 消息套接字成功时记交付，统计保留与确认醒来的区别。
+- **安装版本比较**。提交不同时，`doctor` 使用 GitHub Compare API 以 GitHub main 为基准、安装提交为比较对象。只有 `behind` 建议更新。安装提交在 GitHub 尚不可比较时，报告无法判断。 [GitHub Compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits)
+

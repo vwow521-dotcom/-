@@ -4,6 +4,7 @@ import { activityFor } from "./activity.js";
 import type { Chat } from "./chat.js";
 import type { DeliveryNotice, Room } from "./room.js";
 import { err, type EngineContext, type Result } from "./context.js";
+import type { Diagnostics } from "./diagnostics.js";
 import type { Leases } from "./leases.js";
 import type { Meetings } from "./meetings.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
@@ -21,6 +22,7 @@ export class Workspace {
     private readonly chat: Chat,
     private readonly room: Room,
     private readonly doorbells: Doorbells,
+    private readonly diagnostics: Diagnostics,
   ) {}
 
   getContext(agent: string, sessionId: string | undefined, lastN = 3): Result {
@@ -131,8 +133,12 @@ export class Workspace {
     const roundMail = openMeeting?.status === "collecting"
       ? this.ctx.store.mailWithPrefix(`meeting-${openMeeting.id}-${openMeeting.round}-`).filter((m) => m.kind === "meeting") : [];
     const deliveries = new Map<string, DeliveryNotice>();
+    const diagnoses = this.diagnostics.notices();
     const agents = this.presence.agentIds().map((id) => {
       const p = this.presence.get(id)!;
+      const product = this.diagnostics.product(id, p.client);
+      const doorbellStats = this.doorbells.stats(id);
+      const failed = doorbellStats.find((stat) => stat.consecutiveFailures > 0);
       const status = this.presence.status(id);
       const lastSeenAt = p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0)).toISOString() : null;
       const active = runOpen ? lives.filter((a) => a.agent === id) : [];
@@ -178,9 +184,13 @@ export class Workspace {
             : []),
         ],
         status,
+        product,
+        doorbellStats,
+        diagnostics: diagnoses.filter((d) => d.agent === id || (d.agent === null && d.product === product?.id)),
         activity: activityFor({
           id, status, lastSeen: lastSeenAt,
           attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
+          failedWake: failed ? failed.label + " 连续 " + failed.consecutiveFailures + " 次唤醒未确认" : undefined,
           meeting: owesTurn ? {
             meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),
           } : undefined,
@@ -224,7 +234,7 @@ export class Workspace {
         if (attention) break;
       }
     const questions = this.ctx.store.openQuestions();
-    const timeline = this.room.timeline(questions, notices, run?.id, meeting?.id);
+    const timeline = this.room.timeline(questions, notices, diagnoses, run?.id, meeting?.id);
     const now = Date.now();
     return {
       project: this.ctx.cfg.projectDir,

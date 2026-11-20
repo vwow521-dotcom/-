@@ -1,0 +1,3 @@
+# ai-bridge:managed
+policy:
+  allow_implicit_invocation: false

@@ -17,11 +17,12 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:7878").replace(/\/$/, "");
 const SOCK = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
 const TOKEN = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
+const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const LOG_DIR = path.join(os.tmpdir(), "ai-bridge");
 fs.mkdirSync(LOG_DIR, { recursive: true });
 const LOG = path.join(LOG_DIR, "proxy.log");
@@ -80,15 +81,34 @@ function toolReply(result) {
   return {};
 }
 
+// Inspect the pipe directory (or Unix inode) without opening the messaging connection.
+function claudePipe() {
+  if (!SOCK) return "unknown";
+  try {
+    if (process.platform !== "win32") return fs.statSync(SOCK).isSocket() ? "present" : "absent";
+    const prefix = "\\\\.\\pipe\\";
+    if (!SOCK.toLowerCase().startsWith(prefix)) return "unknown";
+    const pipe = SOCK.slice(prefix.length).toLowerCase();
+    return fs.readdirSync(prefix).some((name) => name.toLowerCase() === pipe) ? "present" : "absent";
+  } catch (error) {
+    return process.platform !== "win32" && error.code === "ENOENT" ? "absent" : "unknown";
+  }
+}
+
 async function getClient() {
   if (closing) throw new Error("stdio is closing");
   if (connecting) return connecting;
   if (client) return client;
   connecting = (async () => {
-    const c = new Client({ name: "bridge-stdio-proxy", version: "0.2.0" });
+    const c = new Client({ name: "bridge-stdio-proxy", version: VERSION });
     // Tell the daemon on every request that this session can ring Claude, so an identity it recovers on any
     // tool call (not only join) gets the claude-socket doorbell back.
-    const headers = SOCK && TOKEN ? { "x-bridge-doorbell": "claude-socket" } : {};
+    const headers = {
+      "x-bridge-client": (server.getClientVersion()?.name ?? "").replace(/[^ -~]/g, "?").slice(0, 160),
+      "x-bridge-claude-socket": SOCK ? "present" : "absent",
+      "x-bridge-claude-pipe": claudePipe(),
+      ...(SOCK && TOKEN ? { "x-bridge-doorbell": "claude-socket" } : {}),
+    };
     const transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"), { requestInit: { headers } });
     httpTransport = transport;
     try {
@@ -225,7 +245,11 @@ async function ringLoop(agent, signal) {
 }
 
 // ---------- downstream (Claude, stdio) ----------
-const server = new Server({ name: "bridge", version: "0.2.0" }, { capabilities: { tools: { listChanged: true } } });
+const server = new Server({ name: "bridge", version: VERSION }, { capabilities: { tools: { listChanged: true }, prompts: {} } });
+server.oninitialized = () => {
+  log("stdio initialized", { client: server.getClientVersion()?.name });
+  if (lastJoin) void getClient().catch(() => waitForDaemonThenAnnounce());
+};
 const OFFLINE_TOOL = {
   name: "bridge_offline",
   description: "协作桥守护进程没有运行。调用它查看如何启动。桥启动后工具列表会刷新：如果你是在找 join 等协作桥工具，请重新搜索或列出工具，不要调用这个。",
@@ -241,6 +265,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     return { tools: [OFFLINE_TOOL] };
   }
 });
+
+async function forwardPrompt(request) {
+  try {
+    return await upstream(request);
+  } catch (error) {
+    if (error instanceof McpError && error.code === ErrorCode.InvalidParams) throw error;
+    throw new McpError(ErrorCode.InternalError, `无法从协作桥读取提示词（${BASE}）。请确认守护进程正在运行且支持 prompts。${error?.message ?? error}`);
+  }
+}
+server.setRequestHandler(ListPromptsRequestSchema, (req, extra) =>
+  forwardPrompt((c) => c.listPrompts(req.params, { signal: extra.signal })),
+);
+server.setRequestHandler(GetPromptRequestSchema, (req, extra) =>
+  forwardPrompt((c) => c.getPrompt(req.params, { signal: extra.signal })),
+);
 
 server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name } = req.params;
@@ -337,4 +376,3 @@ process.stdin.once("end", shutdown);
 process.stdin.once("close", shutdown);
 await server.connect(transport);
 log("stdio connected");
-if (lastJoin) void getClient().catch(() => waitForDaemonThenAnnounce());

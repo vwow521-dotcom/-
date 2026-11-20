@@ -8,43 +8,14 @@
 // "codex-thread" endpoint at the end of every turn of a conversation that joined the bridge.
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { codexQueueDb, findCodexCommand } from "../products/codex-runtime.js";
 import type { Doorbell, DoorbellContext, RingOutcome, Wake } from "./types.js";
 
 export const CODEX_THREAD = "codex-thread"; // endpoint kind
 
 // Registrations from before this daemon started may belong to a conversation the user has since replaced.
 const STARTED_AT = Date.now();
-
-const codexHome = () => process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-
-/** Numeric-aware compare of release directory names like 0.170.0-x86_64-pc-windows-msvc. */
-const byVersion = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
-
-/**
- * How to run the Codex CLI: BRIDGE_CODEX_BIN (a .js/.mjs file runs under node — used by the smoke
- * test), else the newest binary the desktop app installed, else codex(.exe) on PATH. npm's codex.cmd
- * shim is skipped: Node can't execFile a .cmd without a shell.
- */
-export function findCodexCommand(): string[] | null {
-  const env = process.env.BRIDGE_CODEX_BIN;
-  if (env) return /\.(m?js)$/i.test(env) ? [process.execPath, env] : [env];
-  const exe = process.platform === "win32" ? "codex.exe" : "codex";
-  const releases = path.join(codexHome(), "packages", "app-server-daemon", "releases");
-  try {
-    for (const dir of fs.readdirSync(releases).sort(byVersion).reverse()) {
-      const p = path.join(releases, dir, "bin", exe);
-      if (fs.existsSync(p)) return [p];
-    }
-  } catch {}
-  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
-    const p = path.join(dir, exe);
-    if (dir && fs.existsSync(p)) return [p];
-  }
-  return null;
-}
 
 export class CodexQueueDoorbell implements Doorbell {
   readonly kind = "codex-queue" as const;
@@ -53,12 +24,8 @@ export class CodexQueueDoorbell implements Doorbell {
   readonly verify = true;
   private cmd: string[] | null = null;
   private cmdCheckedAt = 0;
-  // A failed `codex queue` takes the doorbell out of the chain for a while, so the Stop hook is told to
-  // park again (the fallback) at the end of the agent's next turn.
-  private failedAt = new Map<string, number>();
   // `codex queue` takes a few seconds; a second ring meanwhile would stack another wake (run #6: an empty turn).
   private inFlight = new Set<string>();
-  static readonly RETRY_AFTER_MS = 10 * 60_000;
 
   constructor(private ctx: DoorbellContext) {}
 
@@ -88,8 +55,6 @@ export class CodexQueueDoorbell implements Doorbell {
     return !!this.command() && (this.ctx.product(agent) === "codex" || !!this.ctx.store.endpoint(agent, CODEX_THREAD));
   }
   available(agent: string) {
-    const failed = this.failedAt.get(agent);
-    if (failed && Date.now() - failed < CodexQueueDoorbell.RETRY_AFTER_MS) return false;
     return !!this.command() && !!this.thread(agent);
   }
   armed(agent: string) {
@@ -102,16 +67,18 @@ export class CodexQueueDoorbell implements Doorbell {
   }
 
   /** A wake message already waiting in Codex's queue for this thread: don't stack another one. */
-  private pending(thread: string): boolean {
+  private pending(agent: string, thread: string, command: string[]): boolean {
+    const file = codexQueueDb();
     try {
-      const db = new DatabaseSync(path.join(codexHome(), "queue_1.sqlite"), { readOnly: true });
+      const db = new DatabaseSync(file, { readOnly: true });
       try {
         return !!db.prepare("SELECT 1 FROM queued_items WHERE thread_id = ? LIMIT 1").get(thread);
       } finally {
         db.close();
       }
     } catch {
-      return false; // no queue DB (yet), or its layout changed: just queue
+      if (fs.existsSync(file)) this.ctx.queueDrift(agent, command);
+      return false;
     }
   }
 
@@ -120,8 +87,8 @@ export class CodexQueueDoorbell implements Doorbell {
     const thread = this.thread(w.agent);
     if (!cmd) return { ok: false, error: "找不到 codex 命令" };
     if (!thread) return { ok: false, error: "还不知道这个 Codex 对话的 ID（它结束一轮后由 Stop hook 登记）" };
-    if (this.inFlight.has(thread)) return { ok: true, note: "上一条叫醒消息正在排进 Codex 队列" };
-    if (this.pending(thread)) return { ok: true, note: "Codex 队列里已经有一条叫醒消息" };
+    if (this.inFlight.has(thread)) return { ok: true, reused: true, note: "上一条叫醒消息正在排进 Codex 队列" };
+    if (this.pending(w.agent, thread, cmd)) return { ok: true, reused: true, note: "Codex 队列里已经有一条叫醒消息" };
     const args = [...cmd.slice(1), "queue", "--thread", thread, "--message", w.text];
     this.inFlight.add(thread);
     return new Promise((resolve) => {
@@ -129,9 +96,7 @@ export class CodexQueueDoorbell implements Doorbell {
         this.inFlight.delete(thread);
         const out = `${stdout ?? ""}${stderr ?? ""}`.trim();
         this.ctx.log("codex_queue", { agent: w.agent, thread, ok: !err, out: out.slice(0, 300) });
-        if (err) this.failedAt.set(w.agent, Date.now());
-        else this.failedAt.delete(w.agent);
-        resolve(err ? { ok: false, error: `codex queue 失败：${(out || err.message).slice(0, 200)}` } : { ok: true });
+        resolve(err ? { ok: false, cooldown: true, error: `codex queue 失败：${(out || err.message).slice(0, 200)}` } : { ok: true });
       });
     });
   }

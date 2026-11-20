@@ -3,6 +3,7 @@ import type { Config } from "./config.js";
 import { Doorbells } from "./doorbells/index.js";
 import { Chat } from "./engine/chat.js";
 import { EngineContext } from "./engine/context.js";
+import { Diagnostics } from "./engine/diagnostics.js";
 import { Leases } from "./engine/leases.js";
 import { Meetings } from "./engine/meetings.js";
 import { Postman } from "./engine/postman.js";
@@ -21,14 +22,20 @@ export class Engine {
   readonly meetings: Meetings;
   readonly workspace: Workspace;
   readonly chat: Chat;
+  readonly diagnostics: Diagnostics;
 
   constructor(readonly cfg: Config, store: Store) {
     const ctx = this.context = new EngineContext(cfg, store);
+    this.diagnostics = new Diagnostics(ctx);
     const doorbells = new Doorbells(
       cfg,
       {
         store,
         log: (event, data) => ctx.log(event, data),
+        event: (agent, kind, text) => ctx.event(null, agent, kind, text),
+        changed: () => ctx.onChange(),
+        recovered: (agent) => this.postman.kick(agent),
+        queueDrift: (agent, command) => { void this.diagnostics.queueDrift(agent, command); },
         product: (agent) => cfg.agents[agent]?.product,
         boundAt: (agent) => this.presence.get(agent)?.boundAt,
       },
@@ -51,7 +58,7 @@ export class Engine {
     this.meetings = new Meetings(ctx, this.presence, this.postman, this.scheduler);
     this.chat = new Chat(ctx, this.presence, this.postman);
     const room = new Room(ctx, this.postman, this.scheduler, this.meetings, this.chat);
-    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, this.chat, room, doorbells);
+    this.workspace = new Workspace(ctx, this.presence, this.postman, this.scheduler, this.leases, this.meetings, this.chat, room, doorbells, this.diagnostics);
     this.postman.startSweep(() => this.scheduler.retryBlockedTasks());
   }
 }

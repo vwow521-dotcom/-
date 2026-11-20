@@ -4,6 +4,7 @@
 import type { BridgeEvent, Handoff, Meeting, MeetingTurn, Question } from "../store.js";
 import type { Chat } from "./chat.js";
 import type { EngineContext } from "./context.js";
+import type { DriftNotice } from "./diagnostics.js";
 import type { Meetings } from "./meetings.js";
 import type { Postman } from "./postman.js";
 import type { Scheduler } from "./scheduler.js";
@@ -21,10 +22,10 @@ export interface DeliveryNotice {
 
 type InboxRef = { type: "handoff" | "question"; id: number }
   | { type: "round"; meeting_id: number; round: number }
-  | { type: "delivery"; id: string };
+  | { type: "delivery" | "diagnostic"; id: string };
 
 interface InboxItem {
-  kind: "handoff_gate" | "meeting_final" | "meeting_stalled" | "question" | "delivery";
+  kind: "handoff_gate" | "meeting_final" | "meeting_stalled" | "question" | "delivery" | "diagnostic";
   id: string;
   title: string;
   agent: string | null;
@@ -41,7 +42,7 @@ const EVENTS = 250;
 const MAX_ITEMS = 300;
 
 // Events already shown as their own card, or too chatty for the room.
-const HIDDEN_EVENT_KINDS = new Set(["doorbell", "handoff"]);
+const HIDDEN_EVENT_KINDS = new Set(["doorbell", "handoff", "drift"]);
 const CATEGORY: Record<string, TimelineCategory> = {
   meeting: "meeting",
   run: "task",
@@ -62,7 +63,7 @@ export class Room {
     private readonly chat: Chat,
   ) {}
 
-  timeline(questions: Question[], deliveries: DeliveryNotice[], currentRun?: number, currentMeeting?: number) {
+  timeline(questions: Question[], deliveries: DeliveryNotice[], diagnoses: DriftNotice[], currentRun?: number, currentMeeting?: number) {
     const store = this.ctx.store;
     const items = [
       ...this.chat.recent(CHAT, (a) => this.postman.isBusy(a)).map((c) => ({ type: "chat" as const, cat: "chat" as const, at: c.created_at, ...c })),
@@ -73,13 +74,14 @@ export class Room {
         type: "sys" as const, cat: CATEGORY[e.kind] ?? "other", at: e.created_at, id: e.id, kind: e.kind, agent: e.agent, text: e.text,
       })),
       ...deliveries.map((d) => ({ ...d, type: "delivery" as const, cat: "other" as const, id: `delivery-${d.agent}`, text: d.message })),
+      ...diagnoses.map((d) => ({ ...d, type: "diagnostic" as const, cat: "other" as const, text: d.message })),
     ];
 
     // Stable order: by time, then by type so a handoff precedes the events it caused.
-    const rank: Record<string, number> = { round: 0, handoff: 1, chat: 2, question: 3, sys: 4, delivery: 5 };
+    const rank: Record<string, number> = { round: 0, handoff: 1, chat: 2, question: 3, sys: 4, delivery: 5, diagnostic: 6 };
     items.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : rank[a.type] - rank[b.type]));
     // A long chat must not evict an actionable card or part of the current meeting/task history.
-    const required = (it: (typeof items)[number]) => it.type === "question" || it.type === "delivery"
+    const required = (it: (typeof items)[number]) => it.type === "question" || it.type === "delivery" || it.type === "diagnostic"
       || (it.type === "round" && (it.status !== null || it.meeting_id === currentMeeting))
       || (it.type === "handoff" && (it.gate !== null || it.run_id === currentRun));
     let history = Math.max(0, MAX_ITEMS - items.filter(required).length);
@@ -123,6 +125,11 @@ export class Room {
         items.push({
           kind: "delivery", id: it.id, title: it.title, agent: it.agent, at: it.at, urgency: "high",
           target: { view: "office", anchor: `member-${it.agent}` }, ref: { type: "delivery", id: it.id },
+        });
+      } else if (it.type === "diagnostic") {
+        items.push({
+          kind: "diagnostic", id: it.id, title: it.title, agent: it.agent, at: it.at, urgency: "normal",
+          target: { view: "office", anchor: it.agent ? "member-" + it.agent : it.id }, ref: { type: "diagnostic", id: it.id },
         });
       }
     }

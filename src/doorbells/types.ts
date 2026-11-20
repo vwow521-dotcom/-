@@ -14,11 +14,15 @@ export interface Wake {
   text: string; // one short "[协作桥] … call fetch_inbox" line; the content always stays in the mailbox
 }
 
-export type RingOutcome = { ok: true; note?: string } | { ok: false; error: string };
+export type RingOutcome = { ok: true; note?: string; reused?: boolean } | { ok: false; error: string; cooldown?: boolean };
 
 export interface DoorbellContext {
   store: Store;
   log(event: string, data?: Record<string, unknown>): void;
+  event(agent: string, kind: string, text: string): void;
+  changed(): void;
+  recovered(agent: string): void;
+  queueDrift(agent: string, command: string[]): void;
   /** The agent's `product` from the config (claude-code, codex, …). */
   product(agent: string): string | undefined;
   /** When the agent's current MCP session joined (ms), if it is bound. */

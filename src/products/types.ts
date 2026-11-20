@@ -16,9 +16,18 @@ export interface ProductCli {
 
 export interface ProductProfile {
   readonly ids: readonly string[];
+  readonly label: string;
+  readonly clientNames: readonly string[];
   readonly doorbells: readonly DoorbellKind[];
+  readonly verifiedVersions: readonly string[];
+  detectVersion(): Promise<string>;
   readonly setupHint?: string;
   setup(cli: ProductCli): void;
   uninstall(cli: ProductCli): void;
   doctor(cli: ProductCli): void;
+}
+
+export interface BridgeClient {
+  name: string;
+  claudeSocket?: { present: boolean; pipe: boolean | null };
 }

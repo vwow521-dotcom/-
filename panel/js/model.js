@@ -75,8 +75,15 @@ export function timelineTarget(it) {
   if (it.type === "handoff") return { view: "meeting", anchor: "handoff-" + it.id };
   if (it.type === "question") return { view: "chat", anchor: "question-" + it.id };
   if (it.type === "delivery") return { view: "office", anchor: "member-" + it.agent };
+  if (it.type === "diagnostic") return { view: "office", anchor: it.agent ? "member-" + it.agent : it.id };
   if (it.type === "sys") return { view: "meeting", anchor: "event-" + it.id };
   return { view: "chat", anchor: "message-" + it.id };
+}
+
+export function wakePhrase(agent, product) {
+  if (product === "claude-code") return "/bridge";
+  if (product === "codex") return "$bridge";
+  return "[协作桥] 你有新信。请调用 bridge 的 fetch_inbox（agent_id=" + JSON.stringify(agent) + "）查看并处理。";
 }
 
 function timelineKey(it) {

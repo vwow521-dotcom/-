@@ -70,6 +70,12 @@ const ConfigSchema = z
         offline_after_seconds: z.number().positive().default(300),
       })
       .default({ poll_seconds: 50, stale_after_seconds: 90, offline_after_seconds: 300 }),
+    doorbells: z
+      .object({
+        max_unconfirmed_rings: z.number().int().positive().default(3),
+        cooldown_seconds: z.number().positive().max(2_147_483).default(600),
+      })
+      .default({ max_unconfirmed_rings: 3, cooldown_seconds: 600 }),
     mail: z
       .object({
         ring_retry_seconds: z.number().positive().default(120), // rung but not fetched → ring again
@@ -152,6 +158,9 @@ task_template:
     instructions: 对照任务描述逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
 meetings:
   dir: doc/meetings
+doorbells:
+  max_unconfirmed_rings: 3
+  cooldown_seconds: 600
 `;
 
 export function loadConfig(projectDir: string): Config {

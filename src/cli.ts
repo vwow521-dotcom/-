@@ -15,7 +15,9 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { products } from "./products/index.js";
+import { installedVersion } from "./diagnostics/github.js";
+import { probe } from "./diagnostics/probe.js";
+import { products, versionWarning } from "./products/index.js";
 import type { ProductCli } from "./products/types.js";
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,6 +36,7 @@ const short = (c?: string | null) => (c ? c.slice(0, 7) : "未知");
 const NODE = process.execPath;
 const PROXY = path.join(PKG, "bin", "bridge-mcp.mjs");
 const PORT = 7878;
+const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:" + PORT).replace(/\/$/, "");
 
 const args = process.argv.slice(2);
 const flag = (name: string) => args.includes(`--${name}`);
@@ -50,7 +53,7 @@ const info = (m: string) => console.log("  · " + m);
 
 function backup(file: string) {
   if (!fs.existsSync(file) || DRY) return;
-  const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+  const stamp = new Date().toISOString().replace(/\D/g, "");
   fs.copyFileSync(file, `${file}.bak-ai-bridge-${stamp}`);
 }
 function writeFile(file: string, content: string, what: string) {
@@ -145,8 +148,8 @@ async function start() {
 
 async function bridgeRunning(): Promise<any | null> {
   try {
-    const r = await fetch(`http://127.0.0.1:${PORT}/api/state`, { signal: AbortSignal.timeout(2000) });
-    return await r.json();
+    const r = await fetch(BASE + "/api/state", { signal: AbortSignal.timeout(2000) });
+    return r.ok ? await r.json() : null;
   } catch {
     return null;
   }
@@ -256,18 +259,30 @@ function proxyResponds(): Promise<string | null> {
 
 async function doctor() {
   console.log(`协作桥 ${VERSION} 体检（安装位置 ${PKG}）`);
+  const print = { ok, bad, info };
+  if (flag("probe")) {
+    for (const check of await probe(bridgeRunning)) print[check.state](check.text);
+    return;
+  }
   const built = `${short(BUILD.commit)}${BUILD.dirty ? "，构建时有未提交改动" : ""}${BUILD.builtAt ? `，构建于 ${BUILD.builtAt.slice(0, 16).replace("T", " ")}` : ""}`;
-  const latest = remoteCommit("main");
-  if (!BUILD.commit) info(`安装来源的提交未知（旧的安装包，或不是从 git 构建）；GitHub main 是 ${short(latest)} → 可以运行 ai-bridge update`);
-  else if (!latest) info(`安装自提交 ${built}；连不上 GitHub，没法比较是否最新`);
-  else if (latest === BUILD.commit && BUILD.dirty) info(`安装自提交 ${built}：基于 GitHub main，但带着本地改动`);
-  else if (latest === BUILD.commit) ok(`安装自提交 ${built}，与 GitHub main 一致`);
-  else bad(`安装自提交 ${built}，GitHub main 已是 ${short(latest)} → 运行 ai-bridge update`);
+  const install = await installedVersion(REPO, BUILD.commit ? remoteCommit("main") : null, BUILD, built);
+  print[install.state](install.text);
   const [maj, min] = process.versions.node.split(".").map(Number);
   if (maj > 22 || (maj === 22 && min >= 13)) ok(`Node ${process.versions.node}`);
   else bad(`Node ${process.versions.node}：需要 22.13 或更新（内置 SQLite）`);
 
-  for (const product of products) product.doctor(cli);
+  const versions = await Promise.all(products.map((product) => product.detectVersion()));
+  for (const [i, product] of products.entries()) {
+    product.doctor(cli);
+    const version = versions[i];
+    const warning = versionWarning(product, version);
+    const detail = product.label + " 版本 " + version;
+    if (warning) {
+      const line = detail + " · " + warning;
+      info(process.stdout.isTTY ? "\x1b[33m" + line + "\x1b[0m" : line);
+    } else if (version === "unknown") info(detail);
+    else ok(detail + "（门铃已验证）");
+  }
 
   const tools = await proxyResponds();
   if (tools === null) bad("转接程序没有响应");
@@ -276,7 +291,7 @@ async function doctor() {
 
   const s = await bridgeRunning();
   if (s) info(`桥正在运行：项目 ${s.project}，成员 ${s.agents.map((a: any) => `${a.id}=${a.status}`).join("、")}`);
-  else info(`桥没有在 ${PORT} 端口运行`);
+  else info("桥没有在 " + BASE + " 运行");
 }
 
 function help() {
@@ -288,6 +303,7 @@ function help() {
   ai-bridge start [目录] [--port 7878]
                                   为项目启动协作桥（面板 http://127.0.0.1:7878/）
   ai-bridge doctor                检查配置是否一致、安装是否和 GitHub 上的最新版一致
+  ai-bridge doctor --probe        只读检查门铃命令、数据格式和代理套接字报告
   ai-bridge update [--ref <分支|标签|提交>] [--force]
                                   从 GitHub 重新安装，然后只刷新已经配置了 bridge 的客户端
   ai-bridge setup --refresh       只更新已有的配置，不新增（update 会自动调用）

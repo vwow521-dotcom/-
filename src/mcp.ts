@@ -1,15 +1,33 @@
 // MCP tool surface. One McpServer per client session; all share the Engine.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import fs from "node:fs";
 import { z } from "zod";
 import type { Engine } from "./engine.js";
 import type { Result } from "./engine/context.js";
+import { productByClient, productById } from "./products/index.js";
+import type { BridgeClient } from "./products/types.js";
 
 const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(obj, null, 2) }] });
+const version: string = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+const prompt = (message: string) => ({ messages: [{ role: "user" as const, content: { type: "text" as const, text: message } }] });
 
-export function buildServer(engine: Engine): McpServer {
-  const server = new McpServer({ name: "ai-bridge", version: "0.6.0" });
+export function buildServer(engine: Engine, client: BridgeClient): McpServer {
+  const server = new McpServer({ name: "ai-bridge", version });
   const ids = engine.presence.agentIds().join(", ");
   const agentId = z.string().describe(`你的身份，可选：${ids}`);
+  server.registerPrompt("join", {
+    title: "加入协作桥",
+    description: "获取工作协议并查收协作桥的信件。",
+    argsSchema: { agent_id: agentId.optional() },
+  }, ({ agent_id }) => prompt(
+    (agent_id === undefined
+      ? "调用 bridge 的 join，不填 agent_id。若无法确定身份，按返回的候选问用户。"
+      : `你是 AI 协作桥中的 ${agent_id}。调用 bridge 的 join（agent_id = ${JSON.stringify(agent_id)}）。`) +
+    "然后严格按返回的 protocol 工作。交接单和进度汇报用中文。",
+  ));
+  server.registerPrompt("inbox", { title: "查收协作桥信件", description: "继续处理寄给当前成员的信件。" }, () => prompt(
+    "调用 bridge 的 fetch_inbox，填写加入时返回的 agent_id，按取信结果继续工作。尚未加入时先调用 join，不填 agent_id，按返回的 protocol 工作。",
+  ));
   const withAgent = async (agent: string, session: string | undefined, run: () => Result | Promise<Result>) => {
     const recovered = engine.presence.recoverBinding(agent, session);
     const result = await run();
@@ -31,13 +49,25 @@ export function buildServer(engine: Engine): McpServer {
       title: "加入协作桥",
       description: "声明你在协作桥中的身份，获取你负责的阶段和工作协议。会话开始时调用一次。",
       inputSchema: {
-        agent_id: agentId,
+        agent_id: agentId.optional(),
         takeover: z.boolean().optional().describe("该身份已被另一个会话占用、且你确定自己就是它时，设为 true 接管"),
         _doorbell: z.string().optional().describe("由协作桥的本地转接程序自动填写，不要手动设置"),
         _recovery: z.object({ key: z.uuid(), replay: z.boolean() }).optional().describe("由本地转接程序自动管理，不要手动设置"),
       },
     },
-    async ({ agent_id, takeover, _doorbell, _recovery }, extra) => text(engine.presence.join(agent_id, extra.sessionId, takeover, _doorbell, _recovery)),
+    async ({ agent_id, takeover, _doorbell, _recovery }, extra) => {
+      if (agent_id === undefined) {
+        const product = productByClient(client);
+        const matches = product ? engine.presence.agentIds().filter((id) => productById(engine.cfg.agents[id].product) === product) : [];
+        if (matches.length !== 1) {
+          const candidates = matches.length ? matches : engine.presence.agentIds();
+          const reason = matches.length ? "有多个成员与客户端产品匹配" : "没有成员与客户端产品匹配";
+          return text({ error: `${reason}，请指定 agent_id。可选：${candidates.join("、")}`, candidates });
+        }
+        agent_id = matches[0];
+      }
+      return text(engine.presence.join(agent_id, extra.sessionId, takeover, _doorbell, _recovery, client));
+    },
   );
 
   server.registerTool(
