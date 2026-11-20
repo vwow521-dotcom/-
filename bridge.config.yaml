@@ -1,0 +1,16 @@
+# 协作桥迭代自身时用的配置（ai-bridge start --project 本仓库）。没写的部分用默认值，见 bridge.config.example.yaml。
+# 规划已经写在 docs/prompts/ 里，所以流水线只有编码和审查两步。
+agents:
+  claude: { product: claude-code, doorbell: auto }
+  codex:  { product: codex, doorbell: auto }
+pipeline:
+  - id: implement
+    role: 编码
+    agent: codex
+    instructions: 按目标里指定的 docs/prompts/ 文档执行，逐项自测验收标准。遵守文档里「用协作桥改协作桥」的禁区。
+  - id: review
+    role: 审查
+    agent: claude
+    gate: true
+    on_reject: implement
+    instructions: 对照目标里指定的 docs/prompts/ 文档的验收标准逐项实测。verdict 填 approve 或 reject；review_comments 只写必须修改的阻塞问题，不影响通过的建议写进 observations。
