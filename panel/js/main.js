@@ -1,5 +1,5 @@
 import { createActions } from "./actions.js";
-import { $, content, esc, saveDraft, since } from "./dom.js";
+import { $, content, copyBoxKey, esc, findCopyBox, rememberCopyFallback, saveDraft, showCopyFallback, since } from "./dom.js";
 import { renderInbox } from "./inbox.js";
 import { runOpen, splitTimeline } from "./model.js";
 import { readRoute, router } from "./router.js";
@@ -101,19 +101,30 @@ const local = {
   reply(button) { composer.replyTo(Number(button.dataset.id), button.dataset.agent); },
   unreply() { composer.unreply(); },
   async copyWake(button) {
-    const status = $("[data-copy-status]", button.parentElement);
-    const fallback = $("input", button.parentElement);
+    const key = copyBoxKey(button.closest(".wake-copy"));
+    const phrase = button.dataset.wake;
+    let copied = true;
     try {
-      await navigator.clipboard.writeText(button.dataset.wake);
-      fallback.hidden = true;
-      status.textContent = "已复制";
+      await navigator.clipboard.writeText(phrase);
     } catch {
-      fallback.value = button.dataset.wake;
-      fallback.hidden = false;
-      fallback.focus();
-      fallback.select();
-      status.textContent = "已选中，请手动复制";
+      copied = false;
     }
+    // The card may have been re-rendered (or removed) while the clipboard answered.
+    const box = findCopyBox(key);
+    if (copied) {
+      rememberCopyFallback(key, null);
+      if (!box) return;
+      $("input", box).hidden = true;
+      $("[data-copy-status]", box).textContent = "已复制";
+      return;
+    }
+    const fallback = { value: phrase, status: "已选中，请手动复制" };
+    rememberCopyFallback(key, fallback);
+    if (!box) return;
+    // Select the text unless focus has moved on to something else in the meantime.
+    const active = document.activeElement;
+    const focus = !active || active === document.body || active === button || box.contains(active);
+    showCopyFallback(box, fallback, { focus });
   },
 };
 

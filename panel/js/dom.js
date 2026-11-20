@@ -7,11 +7,63 @@ export const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ 
 export function content(element, html = "") {
   if (rendered.get(element) === html) return;
   const details = new Map([...element.querySelectorAll("details[data-detail]")].map((d) => [d.dataset.detail, d.open]));
+  const focused = focusedCopyField(element);
   element.innerHTML = html;
   for (const d of element.querySelectorAll("details[data-detail]")) {
     if (details.has(d.dataset.detail)) d.open = details.get(d.dataset.detail);
   }
+  restoreCopyFallbacks(element, focused);
   rendered.set(element, html);
+}
+
+// Manual-copy fallbacks of 「复制叫醒语」, kept across re-renders of the same card and phrase.
+const copyFallbacks = new Map();
+
+/** Identifies a copy box by where it is (drawer or view), its card's row keys, and its phrase. */
+export function copyBoxKey(box) {
+  const keys = [];
+  for (let row = box.closest("[data-key]"); row; row = row.parentElement?.closest("[data-key]")) keys.unshift(row.dataset.key);
+  const scope = box.closest("dialog[id], [id^='view-']")?.id ?? "";
+  return [scope, ...keys, $("button[data-wake]", box)?.dataset.wake ?? ""].join("\u0000");
+}
+
+export function findCopyBox(key) {
+  return [...document.querySelectorAll(".wake-copy")].find((box) => copyBoxKey(box) === key) ?? null;
+}
+
+/** Records (or with null, forgets) the fallback state for a copy box. */
+export function rememberCopyFallback(key, fallback) {
+  if (fallback) copyFallbacks.set(key, fallback);
+  else copyFallbacks.delete(key);
+}
+
+export function showCopyFallback(box, { value, status }, { focus = false, selection = null } = {}) {
+  const field = $("input", box);
+  field.value = value;
+  field.hidden = false;
+  $("[data-copy-status]", box).textContent = status;
+  if (!focus) return;
+  field.focus({ preventScroll: true });
+  if (selection) field.setSelectionRange(selection[0], selection[1], selection[2]);
+  else field.select();
+}
+
+function focusedCopyField(element) {
+  const active = document.activeElement;
+  if (!copyFallbacks.size || !(active instanceof HTMLInputElement) || !element.contains(active)) return null;
+  const box = active.closest(".wake-copy");
+  return box ? { key: copyBoxKey(box), selection: [active.selectionStart, active.selectionEnd, active.selectionDirection] } : null;
+}
+
+function restoreCopyFallbacks(element, focused) {
+  if (!copyFallbacks.size) return;
+  for (const box of element.querySelectorAll(".wake-copy")) {
+    const key = copyBoxKey(box);
+    const fallback = copyFallbacks.get(key);
+    if (fallback) showCopyFallback(box, fallback, { focus: focused?.key === key, selection: focused?.selection });
+  }
+  // A card that is gone, switched to another member, or now shows another phrase drops its state.
+  for (const key of copyFallbacks.keys()) if (!findCopyBox(key)) copyFallbacks.delete(key);
 }
 
 // The same question or approval can appear in a view and in the drawer.
