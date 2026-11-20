@@ -179,7 +179,7 @@ export class Workspace {
         ],
         status,
         activity: activityFor({
-          id, status, lastSeen: p.lastSeenAt ? new Date(p.lastSeenAt).toISOString() : null,
+          id, status, lastSeen: lastSeenAt,
           attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
           meeting: owesTurn ? {
             meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),

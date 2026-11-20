@@ -50,7 +50,7 @@ const navigate = router(({ view, anchor }) => {
   const changed = activeView !== view;
   if (changed) {
     if (activeView) {
-      scrolls.set(activeView, scrollArea(activeView).scrollTop);
+      if (state.current) scrolls.set(activeView, scrollArea(activeView).scrollTop);
       $("#view-" + activeView).hidden = true;
     }
     $("#view-" + view).hidden = false;

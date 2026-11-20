@@ -257,15 +257,22 @@ try {
   await api(`/api/attempts/${s.live.id}/decide`, { action: "approve", note: "" });
   s = await state();
   check(s.run.status === "done" && !s.live, "run done after final approval");
+  const idleClaude = s.agents.find((a: any) => a.id === "claude");
+  check(idleClaude?.activity.state === "idle" && idleClaude.lastSeenAt && idleClaude.activity.since === idleClaude.lastSeenAt,
+    "Office uses the same latest activity timestamp as member details after a handoff");
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
   check(commits.length === 5 && commits.some((c) => c.includes("审查通过")), `5 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
   const [panel, mainAsset, cssAsset, oldPanel, oldScript, oldStyle] = await Promise.all(
     ["/", "/panel/js/main.js", "/panel/app.css", "/v1", "/panel/v1/room.js", "/panel/v1/room.css"].map((p) => fetch(BASE + p)),
   );
-  check(panel.ok && (await panel.text()).includes('type="module" src="/panel/js/main.js"') &&
+  const panelHtml = await panel.text();
+  check(panel.ok && panelHtml.includes('type="module" src="/panel/js/main.js"') &&
     mainAsset.ok && /javascript/i.test(mainAsset.headers.get("content-type") || "") && cssAsset.ok,
     "three-view panel serves its ES module with JavaScript MIME type");
+  const views = panelHtml.match(/<section\b[^>]*\bid="view-(?:chat|meeting|office)"[^>]*>/g) ?? [];
+  check(views.length === 3 && views.every((view) => /\s+hidden(?:\s|>)/.test(view)),
+    "all three views start hidden so direct Meeting or Office links can mount just one view");
   check(oldPanel.ok && (await oldPanel.text()).includes("/panel/v1/room.js") && oldScript.ok && oldStyle.ok, "meeting-room fallback still served at /v1");
   check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
   const model = await import(new URL("../panel/js/model.js", import.meta.url).href);

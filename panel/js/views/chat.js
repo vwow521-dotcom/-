@@ -40,8 +40,9 @@ export function renderMembers(agents) {
 }
 
 export function renderChat({ timeline, chat, ids }) {
+  const list = $("#chat-timeline");
   const scroll = $("#chat-scroll");
-  const atBottom = scroll.clientHeight && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 64;
+  const followLatest = !list.firstElementChild || (scroll.clientHeight > 0 && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 64);
   const { messages } = splitTimeline(timeline, chat);
   const items = [];
   let previousDay = "";
@@ -53,10 +54,10 @@ export function renderChat({ timeline, chat, ids }) {
     }
     items.push(timelineRow(item, ids, messages));
   }
-  rows($("#chat-timeline"), items.length ? items : [{
+  rows(list, items.length ? items : [{
     key: "empty", className: "empty", body: "还没有消息。选一个成员发消息，或发起协作。",
   }]);
-  if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+  if (followLatest) scroll.scrollTop = scroll.scrollHeight;
 }
 
 export function createComposer(post) {
