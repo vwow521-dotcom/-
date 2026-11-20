@@ -7,34 +7,45 @@ export const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ 
 export function content(element, html = "") {
   if (rendered.get(element) === html) return;
   const details = new Map([...element.querySelectorAll("details[data-detail]")].map((d) => [d.dataset.detail, d.open]));
+  const copies = copyTokens(element);
   const focused = focusedCopyField(element);
   element.innerHTML = html;
   for (const d of element.querySelectorAll("details[data-detail]")) {
     if (details.has(d.dataset.detail)) d.open = details.get(d.dataset.detail);
   }
-  restoreCopyFallbacks(element, focused);
+  restoreCopyFallbacks(element, copies, focused);
   rendered.set(element, html);
 }
 
-// Manual-copy fallbacks of 「复制叫醒语」, kept across re-renders of the same card and phrase.
+// 「复制叫醒语」 boxes get a token when clicked. The token (and its manual-copy fallback) survives only a
+// re-render of the same card body showing the same phrase; a removed card, another member or another
+// phrase yields a fresh box without it, so a late clipboard answer for the old box is dropped.
 const copyFallbacks = new Map();
+let nextCopyToken = 1;
 
-/** Identifies a copy box by where it is (drawer or view), its card's row keys, and its phrase. */
-export function copyBoxKey(box) {
-  const keys = [];
-  for (let row = box.closest("[data-key]"); row; row = row.parentElement?.closest("[data-key]")) keys.unshift(row.dataset.key);
-  const scope = box.closest("dialog[id], [id^='view-']")?.id ?? "";
-  return [scope, ...keys, $("button[data-wake]", box)?.dataset.wake ?? ""].join("\u0000");
+function copyBoxKey(box) {
+  return $("button[data-wake]", box)?.dataset.wake ?? "";
 }
 
-export function findCopyBox(key) {
-  return [...document.querySelectorAll(".wake-copy")].find((box) => copyBoxKey(box) === key) ?? null;
+export function copyToken(box) {
+  if (!box.dataset.copyToken) box.dataset.copyToken = String(nextCopyToken++);
+  return box.dataset.copyToken;
 }
 
-/** Records (or with null, forgets) the fallback state for a copy box. */
-export function rememberCopyFallback(key, fallback) {
-  if (fallback) copyFallbacks.set(key, fallback);
-  else copyFallbacks.delete(key);
+export function findCopyBox(token) {
+  return document.querySelector('.wake-copy[data-copy-token="' + token + '"]');
+}
+
+/** Records (or with null, forgets) the fallback state for a copy box's token. */
+export function rememberCopyFallback(token, fallback) {
+  if (fallback) copyFallbacks.set(token, fallback);
+  else copyFallbacks.delete(token);
+}
+
+function copyTokens(element) {
+  const tokens = new Map();
+  for (const box of element.querySelectorAll(".wake-copy[data-copy-token]")) tokens.set(copyBoxKey(box), box.dataset.copyToken);
+  return tokens;
 }
 
 export function showCopyFallback(box, { value, status }, { focus = false, selection = null } = {}) {
@@ -50,20 +61,24 @@ export function showCopyFallback(box, { value, status }, { focus = false, select
 
 function focusedCopyField(element) {
   const active = document.activeElement;
-  if (!copyFallbacks.size || !(active instanceof HTMLInputElement) || !element.contains(active)) return null;
-  const box = active.closest(".wake-copy");
-  return box ? { key: copyBoxKey(box), selection: [active.selectionStart, active.selectionEnd, active.selectionDirection] } : null;
+  if (!(active instanceof HTMLInputElement) || !element.contains(active)) return null;
+  const token = active.closest(".wake-copy[data-copy-token]")?.dataset.copyToken;
+  return token ? { token, selection: [active.selectionStart, active.selectionEnd, active.selectionDirection] } : null;
 }
 
-function restoreCopyFallbacks(element, focused) {
-  if (!copyFallbacks.size) return;
-  for (const box of element.querySelectorAll(".wake-copy")) {
-    const key = copyBoxKey(box);
-    const fallback = copyFallbacks.get(key);
-    if (fallback) showCopyFallback(box, fallback, { focus: focused?.key === key, selection: focused?.selection });
+function restoreCopyFallbacks(element, tokens, focused) {
+  if (tokens.size) {
+    for (const box of element.querySelectorAll(".wake-copy")) {
+      const token = tokens.get(copyBoxKey(box));
+      if (!token) continue;
+      tokens.delete(copyBoxKey(box));
+      box.dataset.copyToken = token;
+      const fallback = copyFallbacks.get(token);
+      if (fallback) showCopyFallback(box, fallback, { focus: focused?.token === token, selection: focused?.selection });
+    }
   }
-  // A card that is gone, switched to another member, or now shows another phrase drops its state.
-  for (const key of copyFallbacks.keys()) if (!findCopyBox(key)) copyFallbacks.delete(key);
+  // Tokens whose box is gone (card removed, member switched, phrase changed) drop their state.
+  for (const token of copyFallbacks.keys()) if (!findCopyBox(token)) copyFallbacks.delete(token);
 }
 
 // The same question or approval can appear in a view and in the drawer.

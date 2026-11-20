@@ -1,5 +1,5 @@
 import { createActions } from "./actions.js";
-import { $, content, copyBoxKey, esc, findCopyBox, rememberCopyFallback, saveDraft, showCopyFallback, since } from "./dom.js";
+import { $, content, copyToken, esc, findCopyBox, rememberCopyFallback, saveDraft, showCopyFallback, since } from "./dom.js";
 import { renderInbox } from "./inbox.js";
 import { runOpen, splitTimeline } from "./model.js";
 import { readRoute, router } from "./router.js";
@@ -101,7 +101,8 @@ const local = {
   reply(button) { composer.replyTo(Number(button.dataset.id), button.dataset.agent); },
   unreply() { composer.unreply(); },
   async copyWake(button) {
-    const key = copyBoxKey(button.closest(".wake-copy"));
+    // Bound to this box: a re-render of the same card and phrase keeps the token, anything else drops it.
+    const key = copyToken(button.closest(".wake-copy"));
     const phrase = button.dataset.wake;
     let copied = true;
     try {
