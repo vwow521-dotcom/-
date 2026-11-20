@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Bridge 面板预览</title>
+<style>
+/* ---------------------------------------------------------------- tokens */
+:root {
+  color-scheme: light;
+  --bg: #f3f2ee;
+  --surface: #ffffff;
+  --surface-2: #ebe9e3;
+  --surface-3: #e1ded6;
+  --line: #dcd8cf;
+  --ink: #1b1d22;
+  --ink-2: #4a4f5a;
+  --ink-3: #6f7581;
+  --accent: #2b59c3;          /* 进行中 */
+  --accent-ink: #ffffff;
+  --accent-soft: #e4ebfa;
+  --need: #a24a05;            /* 需要你 */
+  --need-strong: #e8900c;
+  --need-soft: #fcefd6;
+  --done: #5b6474;            /* 已结束 */
+  --done-soft: #e9ebee;
+  --ok: #157a3d;
+  --ok-soft: #dff2e6;
+  --bad: #b42318;
+  --bad-soft: #fbe5e3;
+  --m-claude: #7c4ddb;
+  --m-codex: #0b8173;
+  --m-human: #475467;
+  --m-unknown: #8a909b;
+  --shadow: 0 1px 2px rgba(27,29,34,.06), 0 4px 16px rgba(27,29,34,.06);
+  --radius: 12px;
+  --radius-s: 8px;
+  font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121418; --surface: #1a1d23; --surface-2: #22262e; --surface-3: #2b303a; --line: #2f343e;
+    --ink: #eceef1; --ink-2: #b6bbc5; --ink-3: #8b919c;
+    --accent: #7097f0; --accent-ink: #0d1424; --accent-soft: #1d2840;
+    --need: #f5b14a; --need-strong: #f5a524; --need-soft: #392810;
+    --done: #9aa3b2; --done-soft: #262b34;
+    --ok: #57d48a; --ok-soft: #13301f; --bad: #f47b70; --bad-soft: #3a1715;
+    --m-claude: #a98bf5; --m-codex: #33cbb6; --m-human: #a3adbd; --m-unknown: #7d838e;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121418; --surface: #1a1d23; --surface-2: #22262e; --surface-3: #2b303a; --line: #2f343e;
+  --ink: #eceef1; --ink-2: #b6bbc5; --ink-3: #8b919c;
+  --accent: #7097f0; --accent-ink: #0d1424; --accent-soft: #1d2840;
+  --need: #f5b14a; --need-strong: #f5a524; --need-soft: #392810;
+  --done: #9aa3b2; --done-soft: #262b34;
+  --ok: #57d48a; --ok-soft: #13301f; --bad: #f47b70; --bad-soft: #3a1715;
+  --m-claude: #a98bf5; --m-codex: #33cbb6; --m-human: #a3adbd; --m-unknown: #7d838e;
+  --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+}
+
+/* ---------------------------------------------------------------- base */
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink); display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; }
+h1,h2,h3,h4,p,ul,ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+button, input, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; }
+code { font-family: "Cascadia Mono", Consolas, monospace; font-size: .86em; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.muted { color: var(--ink-3); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ---------------------------------------------------------------- top bar */
+.top { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand b { font-size: 16px; letter-spacing: -.01em; white-space: nowrap; }
+.brand span { color: var(--ink-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.preview-tag { font-size: 11px; font-weight: 600; color: var(--need); background: var(--need-soft); padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+.views { display: flex; gap: 2px; background: var(--surface-2); padding: 3px; border-radius: 10px; margin: 0 auto; }
+.views button { padding: 6px 18px; border-radius: 8px; font-weight: 600; color: var(--ink-2); }
+.views button[aria-current="page"] { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; padding: 7px 14px; border-radius: 9px; font-weight: 600; background: var(--surface-2); color: var(--ink); }
+.btn:hover { background: var(--surface-3); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.need { background: var(--need-strong); color: #1d1300; }
+.btn.danger { background: var(--bad-soft); color: var(--bad); }
+.btn.small { padding: 5px 10px; font-size: 13px; }
+.btn.icon { padding: 7px 9px; }
+.count { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: #1d1300; color: var(--need-strong); font-size: 12px; display: inline-grid; place-items: center; }
+
+/* ---------------------------------------------------------------- pills, avatars */
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pill.need { background: var(--need-soft); color: var(--need); }
+.pill.run { background: var(--accent-soft); color: var(--accent); }
+.pill.done { background: var(--done-soft); color: var(--done); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.av { --c: var(--m-unknown); width: 22px; height: 22px; border-radius: 50%; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; background: var(--c); flex: none; }
+.av.lg { width: 30px; height: 30px; font-size: 13px; }
+.av.claude { --c: var(--m-claude); } .av.codex { --c: var(--m-codex); } .av.human { --c: var(--m-human); }
+.who { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+
+/* ---------------------------------------------------------------- shell */
+main { min-height: 0; }
+.view { height: 100%; min-height: 0; }
+
+/* ---------------------------------------------------------------- MEETING: three columns */
+.meeting { display: grid; grid-template-columns: 272px minmax(0,1fr) 300px; height: 100%; }
+.col { min-height: 0; overflow: auto; }
+.folders { border-right: 1px solid var(--line); background: var(--surface-2); padding: 14px 10px; }
+.folders .head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px 10px; }
+.folders .head h2 { font-size: 13px; text-transform: none; color: var(--ink-2); }
+.group { margin-bottom: 14px; }
+.group > button { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; font-weight: 700; color: var(--ink-3); letter-spacing: .02em; }
+.group > button .bar { width: 3px; height: 12px; border-radius: 2px; background: currentColor; }
+.group.g-need > button { color: var(--need); }
+.group.g-run > button { color: var(--accent); }
+.group > button .caret { margin-left: auto; transition: transform .15s; }
+.group[data-open="false"] > button .caret { transform: rotate(-90deg); }
+.folder { width: 100%; text-align: left; display: grid; grid-template-columns: 22px minmax(0,1fr); gap: 8px; padding: 9px 10px; border-radius: 10px; color: var(--ink); }
+.folder:hover { background: var(--surface-3); }
+.folder[aria-current="true"] { background: var(--surface); box-shadow: var(--shadow); }
+.folder .ic { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: var(--surface-3); color: var(--ink-2); }
+.folder .bd { min-width: 0; display: grid; gap: 4px; }
+.folder .tp { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.folder .t { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder .m { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); white-space: nowrap; min-width: 0; }
+.folder .dots { display: inline-flex; }
+.folder .dots i { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--surface-2); margin-left: -3px; }
+.folder .n { align-self: start; font-size: 11px; font-weight: 700; color: #1d1300; background: var(--need-strong); border-radius: 99px; padding: 1px 7px; }
+.folder.is-done .t { color: var(--ink-2); font-weight: 500; }
+
+/* center */
+.folder-view { display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; min-height: 0; overflow: hidden; background: var(--bg); }
+.fv-head { padding: 18px 28px 12px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.back { display: none; margin-bottom: 8px; }
+.kicker { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-size: 12px; font-weight: 600; }
+.fv-head h1 { font-size: 22px; letter-spacing: -.02em; margin: 6px 0 10px; line-height: 1.3; }
+.fv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.phases { display: flex; gap: 4px; }
+.phases li { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 6px; background: var(--surface-2); color: var(--ink-3); }
+.phases li.done { background: var(--done-soft); color: var(--done); }
+.phases li.done::before { content: "✓ "; }
+.phases li.now { background: var(--accent); color: var(--accent-ink); }
+.tabs { display: flex; gap: 4px; padding: 0 24px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.tabs button { padding: 10px 12px; font-weight: 600; color: var(--ink-3); border-bottom: 2px solid transparent; display: inline-flex; gap: 6px; align-items: center; }
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.tabs .tn { font-size: 11px; padding: 0 6px; border-radius: 99px; background: var(--surface-2); color: var(--ink-2); }
+.tabs .tn.need { background: var(--need-strong); color: #1d1300; }
+.fv-body { overflow: auto; padding: 20px 28px 28px; }
+.actionbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 28px; background: var(--surface); border-top: 1px solid var(--line); }
+.actionbar .ctx { color: var(--ink-2); font-size: 13px; margin-right: auto; }
+.actionbar input { flex: 1 1 220px; min-width: 0; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); }
+
+.sec-title { font-size: 12px; font-weight: 700; color: var(--ink-3); letter-spacing: .03em; margin: 18px 0 8px; }
+.sec-title:first-child { margin-top: 0; }
+
+/* gate card */
+.gate { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); border-left: 4px solid var(--need-strong); padding: 16px 18px; margin-bottom: 14px; }
+.gate .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.gate h3 { font-size: 15px; margin: 8px 0 6px; }
+.gate ul { margin: 8px 0 12px; display: grid; gap: 4px; color: var(--ink-2); }
+.gate ul li::before { content: "· "; color: var(--ink-3); }
+.gate .acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.gate .acts input { flex: 1 1 200px; padding: 7px 11px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg); min-width: 0; }
+
+/* compact rows */
+.rows { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.rowx { display: grid; grid-template-columns: 30px minmax(0,1fr) auto; gap: 2px 12px; padding: 11px 16px; border-top: 1px solid var(--line); align-items: center; }
+.rowx:first-child { border-top: 0; }
+.rowx .s { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rowx .sub { grid-column: 2; font-size: 12px; color: var(--ink-3); display: flex; gap: 10px; flex-wrap: wrap; }
+.rowx .r { grid-row: span 2; text-align: right; display: grid; gap: 4px; justify-items: end; font-size: 12px; color: var(--ink-3); }
+.more { display: block; width: 100%; padding: 10px; color: var(--accent); font-weight: 600; border-top: 1px solid var(--line); }
+
+/* tasks */
+.task { display: grid; grid-template-columns: 44px minmax(0,1fr) auto; gap: 4px 14px; padding: 14px 16px; border-top: 1px solid var(--line); }
+.task:first-child { border-top: 0; }
+.task .key { font-weight: 800; font-size: 15px; color: var(--ink-2); }
+.task h3 { font-size: 14px; }
+.task .people { grid-column: 2; display: flex; gap: 14px; font-size: 12px; color: var(--ink-3); align-items: center; flex-wrap: wrap; }
+.task .paths { grid-column: 2 / 4; display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* rounds */
+.round { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 12px; }
+.round > header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; }
+.round > header h3 { font-size: 14px; }
+.round > header .caret { margin-left: auto; color: var(--ink-3); }
+.round .sum { padding: 0 16px 12px; display: grid; gap: 6px; color: var(--ink-2); }
+.round .sum li { display: flex; gap: 8px; align-items: baseline; }
+.speeches { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; padding: 0 16px 16px; }
+.speech { border-radius: 10px; background: var(--bg); padding: 12px 14px; border-top: 3px solid var(--c, var(--m-unknown)); }
+.speech.claude { --c: var(--m-claude); } .speech.codex { --c: var(--m-codex); }
+.speech p { color: var(--ink-2); line-height: 1.6; margin-top: 8px; display: -webkit-box; -webkit-line-clamp: 8; -webkit-box-orient: vertical; overflow: hidden; }
+.speech.waiting { border-top-style: dashed; display: grid; place-items: center; min-height: 120px; color: var(--ink-3); text-align: center; }
+
+/* fixed rail */
+.fixed { border-left: 1px solid var(--line); background: var(--surface); padding: 16px; display: grid; gap: 20px; align-content: start; }
+.fixed h2 { font-size: 12px; font-weight: 700; color: var(--ink-3); letter-spacing: .03em; margin-bottom: 8px; display: flex; justify-content: space-between; }
+.member { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 2px 10px; padding: 8px 0; }
+.member .st { font-size: 12px; color: var(--ink-3); grid-column: 2; }
+.lease { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; padding: 4px 0; }
+.lease code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note { font-size: 13px; color: var(--ink-2); padding: 8px 10px; background: var(--bg); border-radius: 8px; margin-bottom: 6px; line-height: 1.5; }
+.note b { color: var(--ink); }
+.feed li { display: grid; grid-template-columns: 44px minmax(0,1fr); gap: 8px; font-size: 12px; padding: 4px 0; color: var(--ink-2); }
+.feed time { color: var(--ink-3); }
+
+/* ---------------------------------------------------------------- CHAT */
+.chat { display: grid; grid-template-columns: 240px minmax(0,1fr); height: 100%; }
+.chat .people { background: var(--surface-2); border-right: 1px solid var(--line); padding: 16px 12px; overflow: auto; }
+.chat .people h2 { font-size: 12px; color: var(--ink-3); margin: 0 8px 8px; }
+.person { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 0 10px; padding: 8px; border-radius: 10px; }
+.person:hover { background: var(--surface-3); }
+.person small { color: var(--ink-3); }
+.stream { display: grid; grid-template-rows: minmax(0,1fr) auto; min-height: 0; }
+.timeline { overflow: auto; padding: 20px 28px; display: grid; gap: 14px; align-content: start; }
+.msg { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 4px 12px; max-width: 760px; }
+.msg .h { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--ink-3); }
+.msg .h b { color: var(--ink); font-size: 14px; }
+.msg .b { grid-column: 2; line-height: 1.6; }
+.msg .rc { grid-column: 2; font-size: 12px; color: var(--ink-3); }
+.mention { color: var(--accent); font-weight: 600; }
+.sysline { display: flex; align-items: center; gap: 10px; max-width: 760px; padding: 8px 12px; border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); font-size: 13px; color: var(--ink-2); }
+.sysline.need { background: var(--need-soft); color: var(--need); font-weight: 600; box-shadow: none; }
+.sysline a { margin-left: auto; color: inherit; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.composer { padding: 12px 28px 16px; background: var(--surface); border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.targets { display: flex; gap: 6px; flex-wrap: wrap; }
+.target { padding: 4px 12px; border-radius: 99px; background: var(--surface-2); font-weight: 600; font-size: 13px; color: var(--ink-2); }
+.target[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.composer .in { display: flex; gap: 10px; }
+.composer textarea { flex: 1; resize: none; padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); min-height: 44px; }
+.hint { font-size: 12px; color: var(--ink-3); }
+
+/* ---------------------------------------------------------------- OFFICE */
+.office { overflow: auto; padding: 24px 28px; }
+.office-grid { display: grid; grid-template-columns: minmax(0,2fr) minmax(260px,1fr); gap: 20px; max-width: 1200px; }
+.desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap: 16px; }
+.desk { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; border-top: 4px solid var(--c, var(--m-unknown)); }
+.desk.claude { --c: var(--m-claude); } .desk.codex { --c: var(--m-codex); }
+.desk .scene { height: 120px; display: grid; place-items: center; background: var(--sc-bg, var(--surface-2)); }
+.desk .info { padding: 12px 14px 14px; display: grid; gap: 6px; }
+.desk .nm { display: flex; align-items: center; gap: 8px; }
+.desk .ev { font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+.desk .acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.st-working  { --sc: var(--accent); --sc-bg: var(--accent-soft); }
+.st-reviewing{ --sc: var(--accent); --sc-bg: var(--accent-soft); }
+.st-meeting  { --sc: var(--m-claude); --sc-bg: var(--surface-2); }
+.st-awaiting { --sc: var(--need-strong); --sc-bg: var(--need-soft); }
+.st-idle     { --sc: var(--ok); --sc-bg: var(--ok-soft); }
+.st-unreach  { --sc: var(--bad); --sc-bg: var(--bad-soft); }
+.st-unknown  { --sc: var(--ink-3); --sc-bg: var(--surface-2); }
+.st-offline  { --sc: var(--ink-3); --sc-bg: var(--done-soft); }
+.scene svg { width: 96px; height: 96px; color: var(--sc); }
+.side-cards { display: grid; gap: 16px; align-content: start; }
+.card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+.card h2 { font-size: 13px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+.legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px,1fr)); gap: 10px; margin-top: 24px; max-width: 1200px; }
+.legend .lg { display: flex; align-items: center; gap: 10px; background: var(--surface); border-radius: 10px; padding: 8px 10px; font-size: 12px; }
+.legend .lg .sw { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center; background: var(--sc-bg); }
+.legend .lg svg { width: 32px; height: 32px; color: var(--sc); }
+
+/* ---------------------------------------------------------------- drawer */
+.scrim { position: fixed; inset: 0; background: rgba(10,12,16,.35); z-index: 20; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); background: var(--bg); z-index: 21; display: grid; grid-template-rows: auto minmax(0,1fr); box-shadow: -8px 0 30px rgba(0,0,0,.15); }
+.drawer header { display: flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.drawer header h2 { font-size: 16px; margin-right: auto; }
+.drawer .body { overflow: auto; padding: 16px; }
+.goto { font-size: 12px; color: var(--accent); font-weight: 600; }
+
+.info-btn { display: none; }
+
+/* ---------------------------------------------------------------- bottom nav (mobile) */
+.bottom-nav { display: none; }
+
+/* ---------------------------------------------------------------- responsive */
+@media (max-width: 1100px) {
+  .meeting { grid-template-columns: 240px minmax(0,1fr); }
+  .meeting .fixed { display: none; }
+  .info-btn { display: inline-flex; }
+}
+@media (max-width: 767px) {
+  body { grid-template-rows: auto minmax(0,1fr) auto; }
+  .top { padding: 8px 16px; gap: 10px; }
+  .brand span, .views, .top .launch-label, .top .need-label, .preview-tag { display: none; }
+  .top-actions { margin-left: auto; }
+  .bottom-nav { display: grid; grid-template-columns: repeat(3,1fr); background: var(--surface); border-top: 1px solid var(--line); }
+  .bottom-nav button { padding: 10px 0 12px; font-weight: 600; color: var(--ink-3); }
+  .bottom-nav button[aria-current="page"] { color: var(--accent); }
+  .meeting { grid-template-columns: 1fr; }
+  .meeting[data-mobile="list"] .folder-view { display: none; }
+  .meeting[data-mobile="folder"] .folders { display: none; }
+  .back { display: inline-flex; }
+  .fv-head, .fv-body, .actionbar { padding-left: 16px; padding-right: 16px; }
+  .tabs { padding: 0 10px; overflow-x: auto; }
+  .chat { grid-template-columns: 1fr; }
+  .chat .people { display: none; }
+  .timeline, .composer { padding-left: 16px; padding-right: 16px; }
+  .office { padding: 16px; }
+  .office-grid { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .btn, .folder, .target, .tabs button { transition: background-color .12s, color .12s; }
+}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand"><b>AI Bridge</b><span>E:\Interaction-ai</span></div>
+  <span class="preview-tag">预览 · 示例数据</span>
+  <nav class="views" aria-label="视图">
+    <button data-view="chat">Chat</button>
+    <button data-view="meeting">Meeting</button>
+    <button data-view="office">Office</button>
+  </nav>
+  <div class="top-actions">
+    <button class="btn need" data-act="drawer" title="待你处理" aria-label="待你处理 2 项"><span class="need-label">待你处理</span><span class="count">2</span></button>
+    <button class="btn primary"><span aria-hidden="true">＋</span><span class="launch-label">发起</span></button>
+    <button class="btn icon" data-act="theme" title="切换浅色 / 深色" aria-label="切换浅色 / 深色">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============================================================ CHAT -->
+  <section class="view chat" id="v-chat" hidden>
+    <aside class="people">
+      <h2>成员</h2>
+      <div class="person"><span class="av lg claude">C</span><div><b>claude</b><br><small>审查中 · T1 审查</small></div></div>
+      <div class="person"><span class="av lg codex">X</span><div><b>codex</b><br><small>工作中 · T2 实现</small></div></div>
+      <div class="person"><span class="av lg human">你</span><div><b>你</b><br><small>2 项待处理</small></div></div>
+    </aside>
+    <div class="stream">
+      <div class="timeline" id="chat-tl"></div>
+      <form class="composer" onsubmit="return false">
+        <div class="targets">
+          <button type="button" class="target" aria-pressed="true">@claude</button>
+          <button type="button" class="target" aria-pressed="false">@codex</button>
+          <button type="button" class="target" aria-pressed="false">@所有人</button>
+        </div>
+        <div class="in">
+          <label class="sr" for="say">消息</label>
+          <textarea id="say" rows="1" placeholder="说点什么（Enter 发送，Shift+Enter 换行）"></textarea>
+          <button class="btn primary" type="button">发送</button>
+        </div>
+        <span class="hint">claude 正在做 T1 审查，消息会排队，等它这一轮结束再送达</span>
+      </form>
+    </div>
+  </section>
+
+  <!-- ============================================================ MEETING -->
+  <section class="view meeting" id="v-meeting" data-mobile="list" hidden>
+    <nav class="col folders" aria-label="文件夹">
+      <div class="head"><h2>会议与工作流</h2><button class="btn small info-btn" data-act="drawer-info">项目信息</button></div>
+      <div id="folder-list"></div>
+    </nav>
+
+    <section class="folder-view" aria-live="polite">
+      <div class="fv-head">
+        <button class="btn small back" data-act="back">← 文件夹</button>
+        <div class="kicker" id="fv-kicker"></div>
+        <h1 id="fv-title"></h1>
+        <div class="fv-meta" id="fv-meta"></div>
+      </div>
+      <div class="tabs" role="tablist" id="fv-tabs"></div>
+      <div class="fv-body" id="fv-body"></div>
+      <div class="actionbar" id="fv-actions"></div>
+    </section>
+
+    <aside class="col fixed" aria-label="项目信息" id="fixed-rail"></aside>
+  </section>
+
+  <!-- ============================================================ OFFICE -->
+  <section class="view office" id="v-office" hidden>
+    <div class="office-grid">
+      <div class="desks" id="desks"></div>
+      <div class="side-cards">
+        <div class="card st-meeting">
+          <h2>会议桌 <span class="pill run">会议 #4 · 第 2 轮</span></h2>
+          <p class="muted" style="font-size:13px">M3：ACP 后台成员怎么接入。等待 codex 互评。</p>
+          <div style="display:flex;gap:6px;margin-top:10px"><span class="av claude">C</span><span class="av codex" style="opacity:.45">X</span></div>
+        </div>
+        <div class="card st-awaiting">
+          <h2>审批桌 <span class="pill need">2 项</span></h2>
+          <p class="muted" style="font-size:13px">T2 实现交接待审批；codex 提了一个问题。</p>
+          <button class="btn need small" style="margin-top:10px" data-act="drawer">打开待你处理</button>
+        </div>
+      </div>
+    </div>
+    <h2 class="sec-title" style="margin-top:28px">状态图例（每种状态的图形都不同，不靠小字）</h2>
+    <div class="legend" id="legend"></div>
+  </section>
+</main>
+
+<nav class="bottom-nav" aria-label="视图">
+  <button data-view="chat">Chat</button>
+  <button data-view="meeting">Meeting</button>
+  <button data-view="office">Office</button>
+</nav>
+
+<!-- ============================================================ DRAWER -->
+<div class="scrim" id="scrim" hidden data-act="close"></div>
+<aside class="drawer" id="drawer" hidden aria-label="待你处理">
+  <header><h2 id="drawer-title">待你处理</h2><button class="btn icon" data-act="close" aria-label="关闭">✕</button></header>
+  <div class="body" id="drawer-body"></div>
+</aside>
+
+<script>
+(function () {
+  // ------------------------------------------------------------ sample data
+  const ICON = {
+    meeting: '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M2 3h12v8H6l-3 3v-3H2z"/></svg>',
+    run: '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M3 2l10 6-10 6z"/></svg>',
+  };
+  const folders = [
+    { id: "m2", kind: "meeting", title: "P3 面板：文件夹与视觉重做", status: "执行中", tone: "need", group: "need", needs: 1, at: "3 分钟前", members: ["claude", "codex"] },
+    { id: "m4", kind: "meeting", title: "M3：ACP 后台成员怎么接入", status: "第 2 轮 · 互评", tone: "run", group: "run", needs: 0, at: "12 分钟前", members: ["claude", "codex"] },
+    { id: "r5", kind: "run", title: "修复 smoke 的端口占用提示", status: "执行中", tone: "run", group: "run", needs: 0, at: "25 分钟前", members: ["codex", "claude"] },
+    { id: "m1", kind: "meeting", title: "修复 0.8.0 审查留下的小问题", status: "已完成", tone: "done", group: "done", needs: 0, at: "今天 14:10", members: ["claude", "codex"] },
+    { id: "r2", kind: "run", title: "P2：一键加入和门铃加固", status: "已完成", tone: "done", group: "done", needs: 0, at: "今天 12:05", members: ["codex", "claude"] },
+    { id: "r1", kind: "run", title: "面板重构 P1", status: "已完成", tone: "done", group: "done", needs: 0, at: "今天 11:06", members: ["codex", "claude"] },
+  ];
+  const GROUPS = [["need", "等你处理"], ["run", "进行中"], ["done", "已完成"]];
+
+  const handoffs = [
+    { agent: "codex", stage: "T2 实现", verdict: null, summary: "Meeting 文件夹布局：三栏、分区标签、交接分页", sha: "a1c93e0", at: "3 分钟前", gate: true },
+    { agent: "claude", stage: "T1 审查", verdict: "approve", summary: "folders 接口与分页通过，smoke 238 项全过", sha: "77be012", at: "18 分钟前" },
+    { agent: "codex", stage: "T1 实现", verdict: null, summary: "新增 GET /api/folders 与 /api/folders/:id，交接分页 20 条", sha: "4d2f9a8", at: "41 分钟前" },
+    { agent: "claude", stage: "T3 实现", verdict: null, summary: "设计 token 与深色模式，主要文字对比度 ≥ 7:1", sha: "b03e771", at: "52 分钟前" },
+    { agent: "codex", stage: "T3 审查", verdict: "reject", summary: "深色模式下需要你徽标对比度 3.9:1，不达标", sha: "e8a1c40", at: "1 小时前" },
+    { agent: "claude", stage: "T3 实现", verdict: null, summary: "初版设计 token", sha: "5c0d3b2", at: "1 小时前" },
+  ];
+  const tasks = [
+    { key: "T1", title: "folders 只读接口与分页", status: ["已完成", "done"], owner: "codex", reviewer: "claude", paths: ["src/engine/folders.ts", "src/daemon.ts", "scripts/smoke.ts"], rounds: 2 },
+    { key: "T2", title: "Meeting 文件夹布局", status: ["待你审批", "need"], owner: "codex", reviewer: "claude", paths: ["panel/js/views/meeting.js", "panel/js/folders.js"], rounds: 1 },
+    { key: "T3", title: "设计 token、深色模式、Office 图形", status: ["审查中", "run"], owner: "claude", reviewer: "codex", paths: ["panel/app.css", "panel/js/views/office.js"], rounds: 3 },
+  ];
+  const rounds = [
+    { n: 1, kind: "提案", sum: [["claude", "三栏：文件夹 / 当前夹 / 固定区，交接分页 20 条"], ["codex", "先做只读 folders 接口，snapshot 只加 folders_head"]] },
+    { n: 2, kind: "互评", sum: [["claude", "同意接口方案；固定区不随夹重建"], ["codex", "分区默认打开当前阶段；手机先列表后详情"]] },
+    { n: 3, kind: "定稿", sum: [["claude", "拆成 T1 接口、T2 布局、T3 视觉，三项可并行"]] },
+  ];
+
+  // ------------------------------------------------------------ helpers
+  const $ = (s) => document.querySelector(s);
+  const av = (id) => '<span class="av ' + id + '">' + (id === "claude" ? "C" : id === "codex" ? "X" : "你") + "</span>";
+  const who = (id) => '<span class="who">' + av(id) + id + "</span>";
+  const verdictPill = (v) => v === "approve" ? '<span class="pill ok">通过</span>' : v === "reject" ? '<span class="pill bad">打回</span>' : '<span class="pill done">交接</span>';
+
+  const ui = { view: "meeting", folder: "m2", tab: null, open: { need: true, run: true, done: false } };
+
+  // ------------------------------------------------------------ meeting view
+  function renderFolders() {
+    $("#folder-list").innerHTML = GROUPS.map(([g, name]) => {
+      const items = folders.filter((f) => f.group === g);
+      return '<div class="group g-' + g + '" data-open="' + ui.open[g] + '">' +
+        '<button data-act="group" data-g="' + g + '"><span class="bar"></span>' + name + " · " + items.length + '<span class="caret">▾</span></button>' +
+        (ui.open[g] ? items.map((f) =>
+          '<button class="folder' + (f.group === "done" ? " is-done" : "") + '" data-act="folder" data-id="' + f.id + '" aria-current="' + (f.id === ui.folder) + '">' +
+            '<span class="ic">' + ICON[f.kind] + "</span>" +
+            '<span class="bd"><span class="tp"><span class="t">' + f.title + "</span>" +
+            (f.needs ? '<span class="n">' + f.needs + "</span>" : "") + "</span>" +
+            '<span class="m"><span class="pill ' + f.tone + '">' + f.status + "</span>" + f.at +
+              '<span class="dots">' + f.members.map((m) => '<i style="background:var(--m-' + m + ')"></i>').join("") + "</span></span></span>" +
+          "</button>").join("") : "") +
+        "</div>";
+    }).join("");
+  }
+
+  function tabsFor(f) {
+    if (f.kind === "meeting" && f.id === "m4") return [["discuss", "讨论", "第 2 轮"], ["minutes", "纪要", ""]];
+    return [["discuss", "讨论", "3 轮"], ["tasks", "任务", "3"], ["handoffs", "交接", "1 待审批"], ["minutes", "纪要", ""]];
+  }
+  function defaultTab(f) { return f.id === "m4" ? "discuss" : f.group === "done" ? "tasks" : "handoffs"; }
+
+  function renderFolderView() {
+    const f = folders.find((x) => x.id === ui.folder);
+    if (!ui.tab) ui.tab = defaultTab(f);
+    $("#fv-kicker").innerHTML = (f.kind === "meeting" ? "会议 #" + f.id.slice(1) : "工作流 #" + f.id.slice(1)) + ' <span class="pill ' + f.tone + '">' + f.status + "</span>";
+    $("#fv-title").textContent = f.title;
+    const phaseNames = f.kind === "meeting" ? ["提案", "互评", "定稿", "批准", "执行"] : ["实现", "审查", "完成"];
+    const now = f.id === "m4" ? 1 : f.group === "done" ? 99 : f.kind === "meeting" ? 4 : 0;
+    $("#fv-meta").innerHTML = '<div style="display:flex;gap:10px">' + f.members.map(who).join("") + "</div>" +
+      '<ol class="phases">' + phaseNames.map((p, i) => '<li class="' + (i < now ? "done" : i === now ? "now" : "") + '">' + p + "</li>").join("") + "</ol>";
+    $("#fv-tabs").innerHTML = tabsFor(f).map(([k, n, c]) =>
+      '<button role="tab" data-act="tab" data-tab="' + k + '" aria-selected="' + (ui.tab === k) + '">' + n +
+      (c ? '<span class="tn' + (c.includes("待审批") ? " need" : "") + '">' + c + "</span>" : "") + "</button>").join("");
+    $("#fv-body").innerHTML = ({ discuss: discuss, tasks: taskList, handoffs: handoffList, minutes: minutes })[ui.tab](f);
+    $("#fv-actions").innerHTML = actions(f);
+  }
+
+  function discuss(f) {
+    if (f.id === "m4") {
+      return '<article class="round"><header><span class="pill run">第 2 轮 · 互评</span><h3>当前轮</h3><span class="caret">等待 codex</span></header>' +
+        '<div class="speeches">' +
+          '<div class="speech claude">' + who("claude") + '<p>ACP 成员作为「后台成员」接入：桥用 session/new 把 MCP 地址传过去，任务用 session/prompt 下发，审批统一走 session/request_permission。建议先接 codex-acp，因为它的权限请求最完整；Gemini CLI 第二步。风险是 ACP 会话的生命周期和桌面会话不同，需要在 presence 里区分 sessionless。</p></div>' +
+          '<div class="speech waiting">' + who("codex") + '<span>还没发言<br><small>已叫醒 2 分钟</small></span></div>' +
+        "</div></article>" +
+        '<article class="round"><header><span class="pill done">第 1 轮 · 提案</span><h3>2 人已发言</h3><span class="caret">展开 ▸</span></header>' +
+        '<ul class="sum"><li>' + av("claude") + "<span>先接 codex-acp，再接 Gemini CLI</span></li><li>" + av("codex") + "<span>ACP worker 放在独立进程池，限制并发 2</span></li></ul></article>";
+    }
+    return rounds.map((r) => '<article class="round"><header><span class="pill done">第 ' + r.n + " 轮 · " + r.kind + "</span><h3>" + r.sum.length + ' 人发言</h3><span class="caret">展开 ▸</span></header>' +
+      '<ul class="sum">' + r.sum.map(([a, s]) => "<li>" + av(a) + "<span>" + s + "</span></li>").join("") + "</ul></article>").join("");
+  }
+
+  function taskList() {
+    return '<div class="rows">' + tasks.map((t) =>
+      '<div class="task"><span class="key">' + t.key + "</span><h3>" + t.title + '</h3><span class="pill ' + t.status[1] + '">' + t.status[0] + "</span>" +
+      '<div class="people"><span>负责 ' + who(t.owner) + "</span><span>审查 " + who(t.reviewer) + "</span><span>第 " + t.rounds + " 轮</span></div>" +
+      '<div class="paths">' + t.paths.map((p) => "<code>" + p + "</code>").join("") + "</div></div>").join("") + "</div>";
+  }
+
+  function gateCard(h) {
+    return '<article class="gate"><div class="row1"><span class="pill need">待你审批</span>' + who(h.agent) + '<span class="muted">' + h.stage + " · " + h.at + "</span></div>" +
+      "<h3>" + h.summary + "</h3>" +
+      "<ul><li>左栏分组：等你处理 / 进行中 / 已完成，已完成默认折叠</li><li>交接每页 20 条，「更早的交接」继续加载</li><li>手机：先列表后详情，固定区进抽屉</li></ul>" +
+      '<div class="acts"><input placeholder="备注（可选，会带进返工信）"><button class="btn primary small">批准</button><button class="btn danger small">打回到「实现」</button></div></article>';
+  }
+
+  function handoffList() {
+    const gate = handoffs.find((h) => h.gate);
+    return '<h3 class="sec-title">待你审批</h3>' + gateCard(gate) +
+      '<h3 class="sec-title">交接记录 · 最近 5 条，共 17 条</h3><div class="rows">' +
+      handoffs.filter((h) => !h.gate).map((h) =>
+        '<div class="rowx">' + av(h.agent) + '<span class="s"><b>' + h.stage + "</b>　" + h.summary + '</span><span class="r">' + verdictPill(h.verdict) + h.at + "</span>" +
+        '<span class="sub"><code>' + h.sha + "</code><span>" + h.agent + "</span></span></div>").join("") +
+      '<button class="more">更早的交接（12）</button></div>';
+  }
+
+  function minutes(f) {
+    return '<div class="rows"><div class="rowx"><span>📄</span><span class="s"><code>doc/meetings/2026-11-20-m' + f.id.slice(1) + '-P3-面板.md</code></span><span class="r">已提交</span></div></div>';
+  }
+
+  function actions(f) {
+    if (f.id === "m4") return '<span class="ctx">第 2 轮互评进行中，codex 还没发言</span><input placeholder="给下一轮的备注"><button class="btn small">跳过 codex，请 claude 定稿</button><button class="btn primary small">再互评一轮</button><button class="btn danger small">取消会议</button>';
+    if (f.group === "done") return '<span class="ctx">已完成 · 纪要已提交</span><button class="btn small">以此为基础开新会议</button>';
+    return '<span class="ctx">执行中：T2 待你审批，T3 审查中</span><button class="btn need small" data-act="tab" data-tab="handoffs">去审批 T2</button><button class="btn danger small">停止工作流</button>';
+  }
+
+  function renderFixed() {
+    $("#fixed-rail").innerHTML =
+      "<section><h2>成员</h2>" +
+        '<div class="member">' + av("claude").replace('class="av', 'class="av lg') + '<b>claude</b><span class="st"><span class="pill run">审查中</span> T3 · attempt #18</span></div>' +
+        '<div class="member">' + av("codex").replace('class="av', 'class="av lg') + '<b>codex</b><span class="st"><span class="pill need">等你审批</span> T2 交接 3 分钟前</span></div>' +
+      "</section>" +
+      "<section><h2>文件租约 <span>3</span></h2>" +
+        '<div class="lease"><code>panel/js/views/meeting.js</code><span class="muted">codex · T2</span></div>' +
+        '<div class="lease"><code>panel/app.css</code><span class="muted">claude · T3</span></div>' +
+        '<div class="lease"><code>panel/js/views/office.js</code><span class="muted">claude · T3</span></div>' +
+      "</section>" +
+      "<section><h2>共享笔记 <span>2</span></h2>" +
+        '<div class="note"><b>配色</b> · claude<br>主强调色用钴蓝，需要你用琥珀，已结束用石板灰。</div>' +
+        '<div class="note"><b>验收脚本</b> · codex<br>375px 检查用 scripts/check-mobile.mjs（不提交）。</div>' +
+      "</section>" +
+      '<section><h2>最近动态</h2><ol class="feed">' +
+        "<li><time>3 分钟</time><span>codex 提交 T2 实现交接</span></li>" +
+        "<li><time>9 分钟</time><span>claude 取走 T3 审查</span></li>" +
+        "<li><time>18 分钟</time><span>你批准了 T1</span></li>" +
+        "<li><time>25 分钟</time><span>工作流 #5 开始</span></li>" +
+        "<li><time>41 分钟</time><span>codex 提交 T1 实现交接</span></li>" +
+      "</ol></section>";
+  }
+
+  // ------------------------------------------------------------ chat view
+  function renderChat() {
+    $("#chat-tl").innerHTML =
+      '<div class="msg">' + av("human").replace('class="av', 'class="av lg') + '<div class="h"><b>你</b><span>14:20</span></div><div class="b"><span class="mention">@claude</span> <span class="mention">@codex</span> P3 的配色先按预览壳子走，深色模式也要。</div><div class="rc">claude 已读 · codex 已读</div></div>' +
+      '<div class="msg">' + av("claude").replace('class="av', 'class="av lg') + '<div class="h"><b>claude</b><span>14:21</span></div><div class="b">收到。我负责 T3 的 token 和深色模式，<span class="mention">@codex</span> 先做 folders 接口。</div><div class="rc">codex 已读</div></div>' +
+      '<div class="sysline">' + ICON.meeting + '<span>会议 #4 第 2 轮：claude 已发言，等待 codex</span><a href="#/meeting/m4" data-act="folder" data-id="m4">查看 →</a></div>' +
+      '<div class="msg">' + av("codex").replace('class="av', 'class="av lg') + '<div class="h"><b>codex</b><span>14:36</span></div><div class="b">T2 布局做完了，交接里附了 375px 截图说明。</div><div class="rc">仅你可见</div></div>' +
+      '<div class="sysline need">' + ICON.run + '<span>T2 实现交接待你审批</span><a href="#/meeting/m2" data-act="folder" data-id="m2" data-tab="handoffs">去审批 →</a></div>';
+  }
+
+  // ------------------------------------------------------------ office view
+  const SCENES = {
+    working: ["工作中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><rect x="14" y="18" width="68" height="46" rx="6"/><path d="M38 76h20M48 64v12"/><path d="M28 34l8 7-8 7M42 48h14" /></svg>'],
+    reviewing: ["审查中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M22 14h34l14 14v40a4 4 0 0 1-4 4H22a4 4 0 0 1-4-4V18a4 4 0 0 1 4-4z"/><path d="M30 34h22M30 44h16"/><circle cx="62" cy="62" r="11"/><path d="M70 70l10 10"/></svg>'],
+    meeting: ["开会中", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4"><ellipse cx="48" cy="54" rx="28" ry="12"/><circle cx="20" cy="30" r="7"/><circle cx="48" cy="22" r="7"/><circle cx="76" cy="30" r="7"/></svg>'],
+    awaiting: ["等你审批", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"><path d="M14 56l12-30h44l12 30v18a4 4 0 0 1-4 4H18a4 4 0 0 1-4-4z"/><path d="M14 56h22l4 8h16l4-8h22"/><circle cx="72" cy="22" r="10" fill="currentColor" stroke="none"/></svg>'],
+    idle: ["待命", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M22 40h44v16a18 18 0 0 1-18 18h-8a18 18 0 0 1-18-18z"/><path d="M66 46h6a8 8 0 0 1 0 16h-6"/><path d="M36 18c0 6 6 6 6 12M50 18c0 6 6 6 6 12"/></svg>'],
+    unreach: ["叫不醒", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linejoin="round"><path d="M48 14l36 64H12z"/><path d="M48 40v18M48 66v2" stroke-linecap="round"/></svg>'],
+    unknown: ["状态未知", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-dasharray="6 6"><circle cx="48" cy="48" r="32"/><path d="M38 40a10 10 0 1 1 14 9c-3 2-4 4-4 7M48 66v1" stroke-dasharray="0"/></svg>'],
+    offline: ["离线", '<svg viewBox="0 0 96 96" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><path d="M60 18a30 30 0 1 0 18 46A26 26 0 0 1 60 18z"/></svg>'],
+  };
+  const STCLASS = { working: "st-working", reviewing: "st-reviewing", meeting: "st-meeting", awaiting: "st-awaiting", idle: "st-idle", unreach: "st-unreach", unknown: "st-unknown", offline: "st-offline" };
+  const desks = [
+    { id: "claude", st: "reviewing", ev: "attempt #18 进行中（T3 审查）", since: "9 分钟" },
+    { id: "codex", st: "awaiting", ev: "T2 实现交接等你审批", since: "3 分钟" },
+    { id: "gemini", st: "unknown", ev: "最近可靠状态：从未加入（M3 计划成员）", since: "—" },
+  ];
+  function renderOffice() {
+    $("#desks").innerHTML = desks.map((d) =>
+      '<article class="desk ' + d.id + " " + STCLASS[d.st] + '"><div class="scene">' + SCENES[d.st][1] + "</div>" +
+      '<div class="info"><div class="nm">' + (d.id === "gemini" ? '<span class="av">G</span><b>gemini</b>' : who(d.id)) +
+        '<span class="pill ' + (d.st === "awaiting" ? "need" : d.st === "unknown" ? "done" : "run") + '" style="margin-left:auto">' + SCENES[d.st][0] + "</span></div>" +
+      '<div class="ev">' + d.ev + " · " + d.since + "</div>" +
+      '<div class="acts"><button class="btn small">看任务</button><button class="btn small">发消息</button>' + (d.st === "unknown" ? '<button class="btn small">查看异常</button>' : "") + "</div></div></article>").join("");
+    $("#legend").innerHTML = Object.keys(SCENES).map((k) => '<div class="lg ' + STCLASS[k] + '"><span class="sw">' + SCENES[k][1] + "</span>" + SCENES[k][0] + "</div>").join("");
+  }
+
+  // ------------------------------------------------------------ drawer
+  function openDrawer(kind) {
+    $("#scrim").hidden = $("#drawer").hidden = false;
+    if (kind === "info") {
+      $("#drawer-title").textContent = "项目信息";
+      $("#drawer-body").innerHTML = $("#fixed-rail").innerHTML;
+      return;
+    }
+    $("#drawer-title").textContent = "待你处理 · 2";
+    $("#drawer-body").innerHTML = gateCard(handoffs[0]) + '<a class="goto" href="#/meeting/m2" data-act="folder" data-id="m2" data-tab="handoffs">在会议 #2 中查看 →</a>' +
+      '<article class="gate" style="margin-top:16px"><div class="row1"><span class="pill need">问题</span>' + who("codex") + '<span class="muted">7 分钟前</span></div>' +
+      "<h3>深色模式的手动切换存 localStorage 还是跟随系统？</h3>" +
+      '<div class="acts"><input placeholder="你的回答"><button class="btn primary small">回答</button></div></article>';
+  }
+  function closeDrawer() { $("#scrim").hidden = $("#drawer").hidden = true; }
+
+  // ------------------------------------------------------------ routing
+  // State drives rendering; the hash is only mirrored (the preview may be served from a data: URL).
+  function go(view, folder) {
+    ui.view = view;
+    if (folder) ui.folder = folder;
+    try { history.replaceState(null, "", "#/" + view + (view === "meeting" ? "/" + ui.folder : "")); } catch (err) {}
+    show();
+  }
+  function route() {
+    const m = location.hash.match(/^#\/(chat|meeting|office)(?:\/(\w+))?/);
+    ui.view = m ? m[1] : "meeting";
+    if (m && m[2] && folders.some((f) => f.id === m[2])) {
+      if (ui.folder !== m[2]) ui.tab = null;
+      ui.folder = m[2];
+      $("#v-meeting").dataset.mobile = "folder";
+    }
+    show();
+  }
+  function show() {
+    for (const v of ["chat", "meeting", "office"]) $("#v-" + v).hidden = v !== ui.view;
+    document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-current", b.dataset.view === ui.view ? "page" : "false"));
+    render();
+  }
+  function render() {
+    if (ui.view === "meeting") { renderFolders(); renderFolderView(); renderFixed(); }
+    if (ui.view === "chat") renderChat();
+    if (ui.view === "office") renderOffice();
+  }
+
+  // ------------------------------------------------------------ events
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-act], [data-view]");
+    if (!b) return;
+    if (b.dataset.view) { go(b.dataset.view); return; }
+    const act = b.dataset.act;
+    if (act === "folder") {
+      e.preventDefault(); closeDrawer();
+      ui.tab = b.dataset.tab || null;
+      $("#v-meeting").dataset.mobile = "folder";
+      go("meeting", b.dataset.id);
+    }
+    if (act === "group") { ui.open[b.dataset.g] = !ui.open[b.dataset.g]; renderFolders(); }
+    if (act === "tab") { ui.tab = b.dataset.tab; renderFolderView(); }
+    if (act === "back") { $("#v-meeting").dataset.mobile = "list"; }
+    if (act === "drawer") openDrawer();
+    if (act === "drawer-info") openDrawer("info");
+    if (act === "close") closeDrawer();
+    if (act === "theme") {
+      const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = dark ? "light" : "dark";
+      try { localStorage.setItem("preview.theme", document.documentElement.dataset.theme); } catch (err) {}
+    }
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  try { const t = localStorage.getItem("preview.theme"); if (t) document.documentElement.dataset.theme = t; } catch (err) {}
+  window.addEventListener("hashchange", route);
+  route();
+})();
+</script>
+</body>
+</html>
