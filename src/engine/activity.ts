@@ -1,4 +1,5 @@
 import type { Stage } from "../config.js";
+import type { Doorbells } from "../doorbells/index.js";
 import type { Attempt, Handoff, Meeting, Task } from "../store.js";
 import type { PresenceStatus } from "./presence.js";
 import type { DeliveryNotice, PanelTarget } from "./room.js";
@@ -24,6 +25,16 @@ function isReview(attempt: Attempt, task: Task | undefined, template: Stage[]) {
     || /(?:^|[\s_-])review(?:$|[\s_-])|审查|审阅|评审/i.test(stage?.role ?? "");
 }
 
+type FailedWake = ReturnType<Doorbells["stats"]>[number];
+
+function failedWakeEvidence(stats: FailedWake) {
+  const { label, consecutiveFailures, ringFailuresInStreak, unconfirmedInStreak } = stats;
+  const prefix = `${label} 连续 ${consecutiveFailures} 次`;
+  if (!unconfirmedInStreak) return `${prefix}响铃失败`;
+  if (!ringFailuresInStreak) return `${prefix}响铃后未确认`;
+  return `${prefix}唤醒异常（响铃失败 ${ringFailuresInStreak} 次，响铃后未确认 ${unconfirmedInStreak} 次）`;
+}
+
 export function activityFor(input: {
   id: string;
   status: PresenceStatus;
@@ -34,7 +45,7 @@ export function activityFor(input: {
   template: Stage[];
   meeting?: { meeting: Meeting; invitedAt: string | null };
   delivery?: DeliveryNotice;
-  failedWake?: string;
+  failedWake?: FailedWake;
 }): Activity {
   const { id, status, lastSeen, attempts, tasks, handoffs, template, meeting, delivery, failedWake } = input;
   const member: PanelTarget = { view: "office", anchor: `member-${id}` };
@@ -50,7 +61,7 @@ export function activityFor(input: {
   });
 
   if (delivery?.reason === "stuck" || delivery?.reason === "unanswered")
-    return result("unreachable", failedWake ? delivery.title + "。" + failedWake : delivery.title, delivery.at);
+    return result("unreachable", failedWake ? `${delivery.title}。${failedWakeEvidence(failedWake)}` : delivery.title, delivery.at);
   if (status === "never-joined") return result(status, "本次守护进程启动后还没有工具调用记录", null);
   if (status === "offline") return result(status, "在线状态已失效，依据 MCP 绑定和最近一次活动判断", lastSeen);
   if (status === "stale") return result(status, "超过在线状态的活动间隔，正在等待连接恢复", lastSeen);

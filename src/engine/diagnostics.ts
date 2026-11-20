@@ -6,6 +6,20 @@ import type { EngineContext } from "./context.js";
 
 type Source = "codex-transcript" | "codex-queue";
 
+interface VersionCache {
+  version: string;
+  nextCheckAt: number;
+  checking: boolean;
+}
+
+function intervalMs(seconds: string | undefined, fallback: number) {
+  const ms = Number(seconds) * 1000;
+  return Number.isFinite(ms) && ms > 0 ? ms : fallback;
+}
+
+const VERSION_REFRESH_MS = intervalMs(process.env.BRIDGE_VERSION_REFRESH_SECONDS, 600_000);
+const VERSION_RETRY_MS = intervalMs(process.env.BRIDGE_VERSION_RETRY_SECONDS, 60_000);
+
 export interface DriftNotice {
   id: string;
   source: Source;
@@ -18,7 +32,7 @@ export interface DriftNotice {
 }
 
 export class Diagnostics {
-  private versions = new Map<ProductProfile, string>();
+  private versions = new Map<ProductProfile, VersionCache>();
   private drift = new Map<string, DriftNotice>();
   private reporting = new Set<string>();
 
@@ -60,14 +74,31 @@ export class Diagnostics {
   }
 
   private version(profile: ProductProfile) {
-    if (!this.versions.has(profile)) {
-      this.versions.set(profile, "unknown");
-      void profile.detectVersion().then((version) => {
-        this.versions.set(profile, version);
-        if (version !== "unknown") this.ctx.onChange();
-      });
+    let cached = this.versions.get(profile);
+    if (!cached) {
+      cached = { version: "unknown", nextCheckAt: 0, checking: false };
+      this.versions.set(profile, cached);
     }
-    return this.versions.get(profile)!;
+    if (!cached.checking && Date.now() >= cached.nextCheckAt) {
+      cached.checking = true;
+      void this.checkVersion(profile, cached);
+    }
+    return cached.version;
+  }
+
+  private async checkVersion(profile: ProductProfile, cached: VersionCache) {
+    let version: string;
+    try {
+      version = await profile.detectVersion();
+    } catch {
+      version = "unknown";
+    }
+    cached.nextCheckAt = Date.now() + (version === "unknown" ? VERSION_RETRY_MS : VERSION_REFRESH_MS);
+    cached.checking = false;
+    if (version !== "unknown" && version !== cached.version) {
+      cached.version = version;
+      this.ctx.onChange();
+    }
   }
 
   private async record(source: Source, agent: string | null, getVersion: () => Promise<string>) {

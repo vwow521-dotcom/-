@@ -138,7 +138,7 @@ export class Workspace {
       const p = this.presence.get(id)!;
       const product = this.diagnostics.product(id, p.client);
       const doorbellStats = this.doorbells.stats(id);
-      const failed = doorbellStats.find((stat) => stat.consecutiveFailures > 0);
+      const failedWake = doorbellStats.find((stat) => stat.consecutiveFailures > 0);
       const status = this.presence.status(id);
       const lastSeenAt = p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0)).toISOString() : null;
       const active = runOpen ? lives.filter((a) => a.agent === id) : [];
@@ -190,7 +190,7 @@ export class Workspace {
         activity: activityFor({
           id, status, lastSeen: lastSeenAt,
           attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
-          failedWake: failed ? failed.label + " 连续 " + failed.consecutiveFailures + " 次唤醒未确认" : undefined,
+          failedWake,
           meeting: owesTurn ? {
             meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),
           } : undefined,

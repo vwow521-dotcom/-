@@ -20,13 +20,22 @@ interface DoorbellStats {
   confirmed: number;
   failed: number;
   consecutiveFailures: number;
+  ringFailuresInStreak: number;
+  unconfirmedInStreak: number;
   lastResult: WakeResult | null;
   at: string | null;
   degradedUntil: string | null;
 }
 const emptyStats = (): DoorbellStats => ({
-  rings: 0, confirmed: 0, failed: 0, consecutiveFailures: 0, lastResult: null, at: null, degradedUntil: null,
+  rings: 0, confirmed: 0, failed: 0, consecutiveFailures: 0, ringFailuresInStreak: 0, unconfirmedInStreak: 0,
+  lastResult: null, at: null, degradedUntil: null,
 });
+
+function resetFailureStreak(stats: DoorbellStats) {
+  stats.consecutiveFailures = 0;
+  stats.ringFailuresInStreak = 0;
+  stats.unconfirmedInStreak = 0;
+}
 
 export class Doorbells {
   readonly claudeSocket: ParkedDoorbell;
@@ -120,10 +129,12 @@ export class Doorbells {
     stats.lastResult = outcome;
     stats.at = new Date().toISOString();
     if (outcome === "confirmed") stats.confirmed++;
-    if (outcome === "confirmed" || outcome === "delivered") stats.consecutiveFailures = 0;
+    if (outcome === "confirmed" || outcome === "delivered") resetFailureStreak(stats);
     if (outcome === "timeout" || outcome === "failed") {
       stats.failed++;
       stats.consecutiveFailures++;
+      if (outcome === "failed") stats.ringFailuresInStreak++;
+      else stats.unconfirmedInStreak++;
       if (bell.verify && (cooldown || stats.consecutiveFailures >= this.cfg.doorbells.max_unconfirmed_rings))
         this.degrade(agent, bell, stats);
     }
@@ -157,7 +168,7 @@ export class Doorbells {
     this.ctx.event(agent, "doorbell_degraded", agent + " 的「" + bell.label + "」暂时降级");
     setTimeout(() => {
       stats.degradedUntil = null;
-      stats.consecutiveFailures = 0;
+      resetFailureStreak(stats);
       this.ctx.log("doorbell_recovered", { agent, via: bell.kind });
       this.ctx.event(agent, "doorbell_recovered", agent + " 的「" + bell.label + "」已恢复");
       this.ctx.recovered(agent);

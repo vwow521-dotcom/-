@@ -6,7 +6,7 @@
 // C: Codex Stop hook doorbell against fake transcripts.
 // E: codex-queue doorbell (`codex queue` via a fake CLI in an isolated CODEX_HOME): hook registers and
 //    doesn't park, mail → codex queue, dedupe against Codex's queue DB, failure → hook parks as fallback.
-// F: MCP prompts and inference, isolated CLI, drift reports and doorbell recovery.
+// F: MCP prompts and inference, isolated CLI, version refresh, drift reports and doorbell recovery.
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
@@ -48,11 +48,22 @@ notify: { enabled: false }
 const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-codex-"));
 const fakeCodex = path.join(codexHome, "fake-codex.mjs");
 const fakeCodexLog = path.join(codexHome, "calls.jsonl");
+const fakeVersionFile = path.join(codexHome, "version");
+const fakeVersionLog = path.join(codexHome, "version-probes.log");
+const fakeVersionHold = path.join(codexHome, "hold-version");
+fs.writeFileSync(fakeVersionFile, "9.1.2");
 fs.writeFileSync(
   fakeCodex,
   `import fs from "node:fs";
 const dir = ${JSON.stringify(codexHome)};
-if (process.argv[2] === "--version") { console.log("codex-cli 9.1.2"); process.exit(0); }
+if (process.argv[2] === "--version") {
+  const version = fs.readFileSync(${JSON.stringify(fakeVersionFile)}, "utf8");
+  fs.appendFileSync(${JSON.stringify(fakeVersionLog)}, version + "\\n");
+  while (fs.existsSync(${JSON.stringify(fakeVersionHold)})) await new Promise((resolve) => setTimeout(resolve, 20));
+  if (version === "fail") process.exit(1);
+  console.log("codex-cli " + version);
+  process.exit(0);
+}
 if (process.argv[2] === "queue" && process.argv[3] === "--help") { console.log("--thread --message"); process.exit(0); }
 fs.appendFileSync(${JSON.stringify(fakeCodexLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");
 if (fs.existsSync(dir + "/fail")) { process.stderr.write("boom"); process.exit(1); }
@@ -61,12 +72,13 @@ console.log("Queued message m-1 for thread " + process.argv[i + 1] + ".");
 `,
 );
 const codexCalls = () => (fs.existsSync(fakeCodexLog) ? fs.readFileSync(fakeCodexLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as string[]) : []);
+const versionProbes = () => fs.existsSync(fakeVersionLog) ? fs.readFileSync(fakeVersionLog, "utf8").trim().split("\n") : [];
 
 let daemon: ChildProcess;
-async function startDaemon(project = proj, wakeGrace = "6") {
+async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<string, string> = {}) {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", project, "--port", String(PORT)], {
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
+    env: { ...process.env, BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2", BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome, ...versionEnv },
   });
   let out = "";
   daemon.stdout!.on("data", (d) => (out += d));
@@ -102,7 +114,10 @@ async function call(c: Client, name: string, args: Record<string, unknown>) {
   return JSON.parse(r.content[0].text);
 }
 const api = async (p: string, body?: unknown) => {
-  const r = await fetch(BASE + p, body === undefined ? undefined : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  // Synchronous CLI checks can block this process past the server's keep-alive timeout.
+  const headers = new Headers({ connection: "close" });
+  if (body !== undefined) headers.set("content-type", "application/json");
+  const r = await fetch(BASE + p, { method: body === undefined ? "GET" : "POST", headers, body: JSON.stringify(body) });
   return { status: r.status, json: (await r.json().catch(() => null)) as any };
 };
 const state = async () => (await api("/api/state")).json;
@@ -834,6 +849,7 @@ try {
 
   // ===== E: codex-queue doorbell =====
   console.log("— E: codex-queue doorbell (fake codex CLI)");
+  const queueStats = (snapshot: any) => snapshot.agents.find((a: any) => a.id === "qbot").doorbellStats.find((d: any) => d.kind === "codex-queue");
   const qbot = await connect("qbot");
   const qj = await call(qbot, "join", { agent_id: "qbot" });
   check(qj.doorbell === "codex-queue" && qj.protocol.some((l: string) => l.includes("正常结束本回合")), "product codex joins with the codex-queue doorbell");
@@ -897,6 +913,10 @@ try {
     qa.doorbellError?.includes("boom") && s.mail.find((m: any) => m.id === broken.json.id)?.status === "queued" && qa.unansweredMail === 1,
     "failed codex queue → mail requeued, error shown, human alerted immediately",
   );
+  const mixedWakeStats = queueStats(s);
+  check(mixedWakeStats.consecutiveFailures === 2 && mixedWakeStats.unconfirmedInStreak === 1 && mixedWakeStats.ringFailuresInStreak === 1 &&
+    activity(s, "qbot")?.evidence.includes("连续 2 次唤醒异常（响铃失败 1 次，响铃后未确认 1 次）"),
+    "a ring timeout and a command failure belong to the same streak and are reported separately");
   fs.rmSync(path.join(codexHome, "fail"));
   const fallback = runHook({ session_id: "thread-q1", turn_id: "t2", stop_hook_active: false, transcript_path: qtx }, { BRIDGE_PARK_SECONDS: "20" });
   h = await fallback;
@@ -919,7 +939,7 @@ try {
   check(h.out === "{}" && calls.length === before + 1 && calls.at(-1)![calls.at(-1)!.indexOf("--thread") + 1] === "thread-q2", "a fresh registration after the restart is woken");
 
   // ===== F: P2 diagnostics and bounded cooldown =====
-  console.log("— F: isolated CLI, format drift and cooldown");
+  console.log("— F: isolated CLI, version refresh, format drift and cooldown");
   await stopDaemon();
   const offlineProxy = await connectProxy("codex-mcp-client");
   let offlineError = "";
@@ -939,7 +959,36 @@ mail: { ring_retry_seconds: 600 }
 doorbells: { cooldown_seconds: 4 }
 notify: { enabled: false }
 `);
-  await startDaemon(diagnosticProject, "0.45");
+  await startDaemon(diagnosticProject, "0.45", { BRIDGE_VERSION_REFRESH_SECONDS: "2", BRIDGE_VERSION_RETRY_SECONDS: "0.25" });
+  const codexVersion = (snapshot: any, id = "qbot") => snapshot.agents.find((a: any) => a.id === id)?.product?.version;
+
+  fs.writeFileSync(fakeVersionFile, "unknown");
+  const probesBeforeFirstRead = versionProbes().length;
+  s = await waitState(() => versionProbes().length > probesBeforeFirstRead, "initial version was not probed");
+  check(codexVersion(s) === "unknown", "the initial product version is unknown until the first successful probe");
+  fs.writeFileSync(fakeVersionFile, "9.1.2");
+  s = await waitState((snapshot) => codexVersion(snapshot) === "9.1.2", "unknown version was not retried");
+  check(codexVersion(s, "codex_alt") === "9.1.2", "members of the same product share the detected version");
+
+  const probesBeforeRefresh = versionProbes().length;
+  fs.writeFileSync(fakeVersionHold, "");
+  fs.writeFileSync(fakeVersionFile, "fail");
+  try {
+    await waitState(() => versionProbes().at(-1) === "fail", "known version did not expire");
+    const snapshots = await Promise.all(Array.from({ length: 5 }, () => state()));
+    await sleep(300); // Allow any duplicate fake processes time to log that they started.
+    check(versionProbes().length === probesBeforeRefresh + 1 && snapshots.every((snapshot) =>
+      codexVersion(snapshot) === "9.1.2" && codexVersion(snapshot, "codex_alt") === "9.1.2"),
+      "concurrent snapshots share one pending probe and return the cached version");
+  } finally {
+    fs.rmSync(fakeVersionHold);
+  }
+  s = await waitState(() => versionProbes().length >= probesBeforeRefresh + 2, "failed version probe was not retried");
+  check(codexVersion(s) === "9.1.2", "a failed probe keeps the last known version through the retry");
+  fs.writeFileSync(fakeVersionFile, "9.2.3");
+  s = await waitState((snapshot) => codexVersion(snapshot) === "9.2.3", "refreshed version was not visible on the running daemon");
+  check(codexVersion(s, "codex_alt") === "9.2.3", "install version changes become visible without restarting the daemon");
+
   const diagnosticCodex = await connectProxy("codex-mcp-client");
   const multiple = await call(diagnosticCodex, "join", {});
   check(multiple.error?.includes("多个成员") && multiple.candidates?.join(",") === "qbot,codex_alt",
@@ -951,7 +1000,6 @@ notify: { enabled: false }
     "a normal Stop transcript and queue schema produce no drift");
 
   await smokeCli(BASE, fakeCodex, check);
-  const queueStats = (snapshot: any) => snapshot.agents.find((a: any) => a.id === "qbot").doorbellStats.find((d: any) => d.kind === "codex-queue");
   for (let i = 1; i <= 2; i++) {
     await api("/api/mail", { to: "qbot", text: "模拟无人确认 " + i });
     s = await waitState((snapshot) => queueStats(snapshot).failed === i, "did not observe sequential wake timeout " + i);
@@ -965,12 +1013,14 @@ notify: { enabled: false }
   s = await waitState((snapshot) => !!queueStats(snapshot).degradedUntil, "queue did not enter cooldown");
   check(fallbackRing.mailIds?.includes(third.json.id) && queueStats(s).rings === 3 && queueStats(s).failed === 3 &&
     queueStats(s).confirmed === 0 && queueStats(s).consecutiveFailures === 3 &&
+    queueStats(s).unconfirmedInStreak === 3 && queueStats(s).ringFailuresInStreak === 0 &&
     s.events.filter((e: any) => e.kind === "doorbell_degraded").length === 1 &&
-    activity(s, "qbot")?.evidence.includes("连续 3 次唤醒未确认"),
+    activity(s, "qbot")?.evidence.includes("连续 3 次响铃后未确认"),
     "three unconfirmed rings degrade only the queue and fall through to the parked hook with the expected evidence");
   await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
   s = await waitState((snapshot) => !queueStats(snapshot).degradedUntil, "queue did not recover after cooldown");
-  check(queueStats(s).consecutiveFailures === 0 && s.events.filter((e: any) => e.kind === "doorbell_recovered").length === 1,
+  check(queueStats(s).consecutiveFailures === 0 && queueStats(s).unconfirmedInStreak === 0 &&
+    s.events.filter((e: any) => e.kind === "doorbell_recovered").length === 1,
     "one recovery event re-enables the queue and resets its failure streak");
   const recoveredMail = await api("/api/mail", { to: "qbot", text: "恢复后的信" });
   await waitState((snapshot) => queueStats(snapshot).rings === 4, "queue did not ring again after recovery");
@@ -979,6 +1029,22 @@ notify: { enabled: false }
   s = await waitState((snapshot) => queueStats(snapshot).confirmed === 1, "resumed ring was not confirmed by a tool call");
   check(queueStats(s).rings === 4 && queueStats(s).failed === 3 && !inboxItem(s, "diagnostic"),
     "wake statistics preserve confirmed and failed totals with a healthy format");
+
+  fs.writeFileSync(path.join(codexHome, "fail"), "");
+  const failedWakeMail = await api("/api/mail", { to: "qbot", text: "模拟队列命令报错" });
+  s = await waitState((snapshot) => !!queueStats(snapshot).degradedUntil, "a single queue command failure did not trigger cooldown");
+  fs.rmSync(path.join(codexHome, "fail"));
+  const commandFailure = queueStats(s);
+  check(commandFailure.consecutiveFailures === 1 && commandFailure.ringFailuresInStreak === 1 && commandFailure.unconfirmedInStreak === 0 &&
+    activity(s, "qbot")?.evidence.includes("连续 1 次响铃失败"),
+    "a command failure degrades immediately and is reported as a ring failure");
+  s = await waitState((snapshot) => !queueStats(snapshot).degradedUntil && queueStats(snapshot).rings > commandFailure.rings,
+    "queue did not retry waiting mail after recovering from a command failure");
+  const recoveredInbox = await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
+  check(queueStats(s).consecutiveFailures === 0 && queueStats(s).ringFailuresInStreak === 0 && queueStats(s).failed === 4 &&
+    recoveredInbox.mails.some((m: any) => m.id === failedWakeMail.json.id),
+    "cooldown recovery clears the ring-failure streak and retries the queued mail");
+  const ringsBeforeDrift = queueStats(s).rings;
 
   const driftTranscript = path.join(diagnosticProject, "rollout-changed.jsonl");
   fs.writeFileSync(driftTranscript, [
@@ -998,7 +1064,7 @@ notify: { enabled: false }
   changedDb.close();
   for (let i = 0; i < 2; i++) {
     await api("/api/mail", { to: "qbot", text: "格式变化时仍可用队列投递 " + i });
-    await waitState((snapshot) => queueStats(snapshot).rings === 5 + i, "schema drift interrupted queue fallback");
+    await waitState((snapshot) => queueStats(snapshot).rings === ringsBeforeDrift + 1 + i, "schema drift interrupted queue fallback");
     await call(diagnosticCodex, "fetch_inbox", { agent_id: "qbot" });
   }
   s = await waitState((snapshot) => snapshot.timeline.some((it: any) => it.source === "codex-queue"), "no queue schema warning");

@@ -78,7 +78,7 @@ export function renderMemberDetails(agent, ids, delivery) {
   ];
   const lastResult = { pending: "等待确认", delivered: "已交给客户端", confirmed: "已确认醒来", timeout: "未确认醒来", failed: "响铃失败" };
   const wakeStats = (doorbellStats ?? []).filter((stat) => stat.rings || stat.failed).map((stat) =>
-    "<li><strong>" + esc(stat.label) + "</strong> · 响铃 " + stat.rings + " · 确认 " + stat.confirmed + " · 失败 " + stat.failed +
+    "<li><strong>" + esc(stat.label) + "</strong> · 响铃 " + stat.rings + " · 确认 " + stat.confirmed + " · 唤醒异常 " + stat.failed +
     (stat.lastResult ? " · 最近结果 " + esc(lastResult[stat.lastResult]) : "") +
     (stat.degradedUntil ? ' <span class="bad">降级至 ' + time(stat.degradedUntil) + "</span>" : "") + "</li>").join("");
   rows(container, [{
