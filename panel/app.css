@@ -332,8 +332,10 @@ svg { flex: none; }
 }
 @media (max-width: 767px) {
   body { grid-template-rows: 56px minmax(0,1fr) auto auto; }
-  .top { grid-template-columns: minmax(0,1fr) auto; padding: 0 12px; }
-  .top .c, .brand span, .top .l .ib { display: none; }
+  .top { grid-template-columns: minmax(0,1fr) auto auto; gap: 8px; padding: 0 12px; }
+  .brand span, .top .l .ib, #home-link, #search > :not(#office-link), #search-results { display: none; }
+  .top .search { width: auto; height: auto; padding: 0; background: transparent; box-shadow: none; }
+  #office-link { width: 44px; height: 44px; }
   .shell, .shell[data-right="none"] { grid-template-columns: 1fr; padding: 0; gap: 0; }
   .panel { border-radius: 0; }
   .lib, .right { display: none !important; }

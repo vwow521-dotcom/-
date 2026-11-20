@@ -62,7 +62,7 @@ const keptFocus = new Map();
 
 let detail;
 let detailError = "";
-let request;
+let folderRequest;
 let detailKey = "";
 const folderKey = () => route.view === "folder" ? route.id + "/" + (route.before || "") : "";
 const sorted = () => [...library.values()].sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id));
@@ -92,32 +92,48 @@ function rememberFiles(data) {
   searchDetails.set(data.folder.id, { ...data, files });
 }
 
+function cancelFolderRequest() {
+  const active = folderRequest;
+  folderRequest = null;
+  active?.controller.abort();
+}
+
 function refreshFolder() {
-  if (!folderKey() || request) return;
-  const id = route.id;
   const key = folderKey();
-  const controller = request = new AbortController();
+  if (!key) return;
+  if (folderRequest) {
+    folderRequest.pending = true;
+    return;
+  }
+  const id = route.id;
+  const controller = new AbortController();
+  const active = folderRequest = { controller, pending: false };
   const query = new URLSearchParams();
   if (route.before) query.set("handoffs_before", route.before);
   get("/api/folders/" + id + (query.size ? "?" + query : ""), controller.signal).then((data) => {
-    if (controller.signal.aborted || folderKey() !== key) return;
+    if (folderRequest !== active || folderKey() !== key) return;
     detail = data;
     detailKey = key;
     detailError = "";
     library.set(id, data.folder);
     rememberFiles(data);
     renderPage();
-    // A shared chat link can point at a handoff that has left page one.
+    // A shared chat link can point at an older handoff. Resolve it after any pending refresh.
+    if (active.pending) return;
     const handoff = /^handoff-(\d+)$/.exec(anchor);
     if (!route.before && handoff && !data.handoffs.some((h) => h.id === Number(handoff[1]))) {
       const before = Number(handoff[1]) + 1;
       if (Number.isSafeInteger(before)) navigate({ ...route, tab: "handoffs", before: String(before) }, true);
     }
   }).catch((error) => {
-    if (controller.signal.aborted) return;
+    if (folderRequest !== active || folderKey() !== key) return;
     detailError = error.message;
     renderPage();
-  }).finally(() => { if (request === controller) request = null; });
+  }).finally(() => {
+    if (folderRequest !== active) return;
+    folderRequest = null;
+    if (active.pending && folderKey() === key) refreshFolder();
+  });
 }
 
 async function expandRound(id, value) {
@@ -190,8 +206,7 @@ const navigate = router((next, nav) => {
   route = next;
   anchor = route.anchor;
   if (from !== folderKey()) {
-    request?.abort();
-    request = null;
+    cancelFolderRequest();
     detailError = "";
   }
   if (mobile.matches && mobilePane === "right") mode = "none";
@@ -463,10 +478,10 @@ state.subscribe((s) => s.agents.map((a) => a.id), (ids) => {
 });
 state.subscribe((s) => s, (snapshot) => {
   if (project !== snapshot.project) {
-    request?.abort();
-    request = null;
+    cancelFolderRequest();
     detail = null;
     detailKey = "";
+    detailError = "";
     library.clear();
     searchDetails.clear();
     olderRounds.clear();
