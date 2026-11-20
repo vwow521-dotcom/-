@@ -1,4 +1,4 @@
-export function createState(connectionChanged) {
+export function createState(connectionChanged, afterRefresh) {
   const subscribers = [];
   let current = null;
   let refreshing = false;
@@ -29,6 +29,7 @@ export function createState(connectionChanged) {
           subscriber.render(data);
           subscriber.signature = signature;
         }
+        afterRefresh?.();
       } while (pending);
     } finally {
       refreshing = false;

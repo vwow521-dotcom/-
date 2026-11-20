@@ -7,7 +7,7 @@
 // E: codex-queue doorbell (`codex queue` via a fake CLI in an isolated CODEX_HOME): hook registers and
 //    doesn't park, mail → codex queue, dedupe against Codex's queue DB, failure → hook parks as fallback.
 // F: MCP prompts and inference, isolated CLI, version refresh, drift reports and doorbell recovery.
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, execFileSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -85,6 +85,7 @@ async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<s
       // Panel snapshots can run git status while the fixture stages a file in the same repository.
       GIT_OPTIONAL_LOCKS: "0",
       BRIDGE_NOTIFY: "0", BRIDGE_WAKE_GRACE_SECONDS: wakeGrace, BRIDGE_UNREACHABLE_ALERT_SECONDS: "2",
+      BRIDGE_WAKE_TURN_EXTRA_SECONDS: "0",
       BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome, ...versionEnv,
     },
   });
@@ -338,10 +339,10 @@ try {
   const panelHtml = await panel.text();
   check(panel.ok && panelHtml.includes('type="module" src="/panel/js/main.js"') &&
     mainAsset.ok && /javascript/i.test(mainAsset.headers.get("content-type") || "") && cssAsset.ok,
-    "three-view panel serves its ES module with JavaScript MIME type");
-  const views = panelHtml.match(/<section\b[^>]*\bid="view-(?:chat|meeting|office)"[^>]*>/g) ?? [];
-  check(views.length === 3 && views.every((view) => /\s+hidden(?:\s|>)/.test(view)),
-    "all three views start hidden so direct Meeting or Office links can mount just one view");
+    "panel serves its ES module with JavaScript MIME type");
+  const views = panelHtml.match(/<section\b[^>]*\bid="view-(?:home|folder|chat|office)"[^>]*>/g) ?? [];
+  check(views.length === 4 && views.every((view) => /\s+hidden(?:\s|>)/.test(view)),
+    "all four views start hidden so a direct link mounts only its own view");
   check(oldPanel.ok && (await oldPanel.text()).includes("/panel/v1/room.js") && oldScript.ok && oldStyle.ok, "meeting-room fallback still served at /v1");
   check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
   const model = await import(new URL("../panel/js/model.js", import.meta.url).href);
@@ -392,7 +393,7 @@ try {
   codex = await connect("codex-again"); // its first session died with the daemon restart above
   await call(codex, "join", { agent_id: "codex" });
   const meetingOf = (r: any) => r.mails?.find((m: any) => m.kind === "meeting" && !m.void)?.meeting;
-  const mt = await api("/api/meetings", { topic: "拆成并行任务", participants: ["claude", "codex"] });
+  const mt = await api("/api/meetings", { topic: "①「（拆成并行任务）」：详细目标", participants: ["claude", "codex"] });
   check(mt.status === 200, "meeting started");
   const mid = mt.json.meeting_id;
   check((await api("/api/runs", { goal: "x" })).status === 409, "pipeline run refused while a meeting is open");
@@ -457,12 +458,30 @@ try {
   sh("add", "--", "IMPORTANT.md");
   write("开工前新增.txt", "用户保留的未暂存文件\n");
   const appr = await api(`/api/meetings/${mid}/decide`, { action: "approve", note: "注意中文注释" });
-  check(appr.status === 200 && /^doc\/meetings\/\d{4}-\d{2}-\d{2}-拆成并行任务\.md$/.test(appr.json.doc_path), `approved → minutes at ${appr.json.doc_path}`);
+  check(appr.status === 200 && /^doc\/meetings\/\d{4}-\d{2}-\d{2}-m\d+-拆成并行任务\.md$/.test(appr.json.doc_path) &&
+    appr.json.doc_path.endsWith(`-m${mid}-拆成并行任务.md`), `approved → numbered, shortened minutes at ${appr.json.doc_path}`);
   const minutes = fs.readFileSync(path.join(proj, appr.json.doc_path), "utf8");
   check(minutes.includes("方案 A") && minutes.includes("| T3 | 合并 |") && minutes.includes("按目录拆 —— 互不干扰"), "minutes hold proposals, decisions and the task table");
   check(sh("log", "-1", "--format=%s", "--", appr.json.doc_path).includes("会议纪要") && !sh("status", "--porcelain").includes("doc/"), "minutes committed on their own");
   s = await state();
   check(!inboxItem(s, "meeting_final"), "the approved final plan disappears from the inbox");
+  const folderId = "m" + mid;
+  const folderPage = (await api("/api/folders?limit=1")).json;
+  const folderNext = (await api("/api/folders?limit=1&before=" + encodeURIComponent(folderPage.next_before))).json;
+  const folderDetail = (await api("/api/folders/" + folderId)).json;
+  const roundDetail = (await api("/api/folders/" + folderId + "?round=1")).json;
+  check(folderPage.folders[0].id === folderId && folderNext.folders[0].kind === "run" &&
+    !s.folders_head.some((f: any) => f.id === "r" + appr.json.run_id) &&
+    (await api("/api/folders/r" + appr.json.run_id)).status === 404,
+    "folders page by activity and keep a meeting and its run together");
+  check(folderDetail.meeting.doc_path === appr.json.doc_path && folderDetail.tasks.length === 4 &&
+    folderDetail.events.some((event: any) => event.run_id === appr.json.run_id) &&
+    folderDetail.rounds[0].turns[0].content.includes("最终方案") &&
+    folderDetail.rounds.at(-1).turns[0].summary && !folderDetail.rounds.at(-1).turns[0].content &&
+    roundDetail.rounds.at(-1).turns.some((turn: any) => turn.content === proposalA),
+    "folder shows minutes, scoped events, active tasks, round summaries and on-demand full turns");
+  check(s.now_playing.length === 3 && s.now_playing.every((item: any) => item.folder === folderId && item.stage_index === 0 && item.since),
+    "all concurrently ready attempts are projected in the meeting folder");
   const ready = activity(s, "codex");
   check(ready?.state === "idle" && ready.evidence.includes("有任务待领取"), "an unfetched ready attempt does not count as working");
   const tk = (k: string) => s.tasks.find((x: any) => x.key === k);
@@ -1100,6 +1119,69 @@ notify: { enabled: false }
     s.agents.find((a: any) => a.id === "qbot").diagnostics.length === 2,
     "changed queue schema falls back to enqueue, with a single per-daemon drift event and member diagnostics");
   await diagnosticCodex.close();
+
+  // ===== G: P3 delivery timing and listener startup =====
+  console.log("— G: P3 ack, queue turn grace and occupied port");
+  await stopDaemon();
+  const queueDb = new DatabaseSync(path.join(codexHome, "queue_1.sqlite"));
+  queueDb.exec("ALTER TABLE incompatible_items RENAME TO queued_items");
+  queueDb.close();
+  const timingProject = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-timing-"));
+  execFileSync("git", ["-C", timingProject, "init", "-q"]);
+  fs.writeFileSync(path.join(timingProject, "bridge.config.yaml"), `agents: { qbot: { product: codex }, other: { doorbell: poll } }
+pipeline:
+  - { id: implement, role: 编码, agent: qbot }
+  - { id: review, role: 审查, agent: qbot, gate: true }
+git: { auto_commit: false }
+mail: { ring_retry_seconds: 1, max_rings: 1, ack_timeout_seconds: 2 }
+notify: { enabled: false }
+`);
+  await startDaemon(timingProject, "0.45", { BRIDGE_WAKE_TURN_EXTRA_SECONDS: "9" });
+  const collisionProject = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-port-"));
+  const collision = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts", "start", collisionProject, "--port", String(PORT)], {
+    encoding: "utf8", timeout: 8000, windowsHide: true, env: { ...process.env, BRIDGE_NOTIFY: "0" },
+  });
+  check(collision.status === 1 && collision.stderr.includes("EADDRINUSE") && collision.stderr.includes(timingProject) &&
+    collision.stderr.includes("--port") && !collision.stdout.includes("面板:") && !fs.existsSync(path.join(collisionProject, ".bridge")) &&
+    (await state()).project === timingProject, "CLI fails on an occupied port and names the running project without opening the new database");
+
+  const timing = await connect("timing-qbot");
+  const other = await connect("timing-other");
+  await call(timing, "join", { agent_id: "qbot" });
+  await call(other, "join", { agent_id: "other" });
+  await call(other, "send_mail", { agent_id: "other", to: "qbot", subject: "确认信", body: "请确认", ack_required: true });
+  const timingRun = await api("/api/runs", { goal: "回合结束后再投递审查" });
+  const letters = (await call(timing, "fetch_inbox", { agent_id: "qbot" })).mails;
+  const inProgressMail = letters.find((m: any) => m.kind === "task").id;
+  const normalMail = letters.find((m: any) => m.kind === "agent").id;
+  const overdue = (snapshot: any, id: string) => snapshot.mail.find((mail: any) => mail.id === id)?.overdue;
+  const until = Date.now() + 9500;
+  do {
+    await call(timing, "report_progress", { agent_id: "qbot", text: "仍在处理" });
+    s = await state();
+    if (overdue(s, normalMail)) break;
+    await sleep(450);
+  } while (Date.now() < until);
+  check(overdue(s, normalMail) && overdue(s, inProgressMail) === false,
+    "active task with recent progress avoids overdue while other acknowledged mail still flags");
+  s = await waitState((snapshot) => overdue(snapshot, inProgressMail), "inactive fetched task was not flagged");
+  check(overdue(s, inProgressMail), "an in-progress task with no recent tools eventually flags overdue");
+
+  await api("/api/agents/qbot/endpoint", { kind: "codex-thread", address: "thread-timing" });
+  const started = Date.now();
+  await call(timing, "submit_handoff", { agent_id: "qbot", summary: "刚交接，当前回合还要结束" });
+  await waitState((snapshot) => queueStats(snapshot).rings === 1, "next stage did not ring Codex queue");
+  await sleep(Math.max(0, 5600 - (Date.now() - started)));
+  s = await state();
+  const queued = s.mail.find((m: any) => m.kind === "task" && m.id !== inProgressMail);
+  check(queued?.status === "rung" && queued.ring_count === 1 && queueStats(s).failed === 0 && !inboxItem(s, "delivery", "qbot"),
+    "deferred queue grace covers both the base timer and the retry sweep just after handoff");
+  check(task(await call(timing, "fetch_inbox", { agent_id: "qbot" }))?.stage.id === "review", "Codex can take its queued review inside the extended grace");
+  s = await waitState((snapshot) => queueStats(snapshot).confirmed === 1, "late fetch was not credited as a confirmed wake");
+  check(queueStats(s).failed === 0 && s.now_playing[0].folder === "r" + timingRun.json.run_id && s.now_playing[0].stage_index === 1,
+    "grace-window fetch is confirmed and exposes the real stage index");
+  await timing.close();
+  await other.close();
 } catch (e) {
   console.error(e);
   failed = true;

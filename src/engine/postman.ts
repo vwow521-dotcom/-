@@ -8,6 +8,9 @@ import type { Presence } from "./presence.js";
 // After a ring, how long to wait for a sign of life (any tool call) before trying the next doorbell in the
 // agent's chain or telling the human. A woken agent may think a while before its first tool call.
 const WAKE_GRACE_MS = Number(process.env.BRIDGE_WAKE_GRACE_SECONDS ?? process.env.BRIDGE_CODEX_WAKE_GRACE_SECONDS ?? 30) * 1000;
+const RECENT_TURN_MS = 60_000;
+const turnExtraSeconds = Number(process.env.BRIDGE_WAKE_TURN_EXTRA_SECONDS ?? 90);
+const TURN_EXTRA_MS = Number.isFinite(turnExtraSeconds) ? Math.max(0, turnExtraSeconds) * 1000 : 90_000;
 export const LIVE_MAIL = ["queued", "rung", "stuck"] as const;
 // Queued mail that no doorbell can deliver (e.g. Claude closed the conversation): tell the human this soon,
 // without marking it stuck, so it is still delivered when the agent comes back.
@@ -18,6 +21,7 @@ export class Postman {
   private readonly mailWakers = new Map<string, () => void>();
   // In-process parked-hook delivery and its scheduled verification share the same mail ID array.
   private readonly verifications = new WeakMap<string[], { counted: boolean; disconnected: boolean }>();
+  private readonly deferredWakes = new Map<string, string[]>();
 
   constructor(
     private readonly ctx: EngineContext,
@@ -131,7 +135,7 @@ export class Postman {
   /**
    * Something is waiting for `agent`: wake its blocked wait_for_mail, and ring the first doorbell in its
    * chain that can deliver now (skipping `tried`). A failed ring falls through to the next doorbell; a
-   * successful one is checked for a sign of life after WAKE_GRACE_MS.
+   * successful one is checked for a sign of life after its grace period.
    */
   kick(agent: string, tried: ReadonlySet<DoorbellKind> = new Set()) {
     const queued = this.ctx.store.mailByStatus(agent, ["queued"]);
@@ -152,6 +156,9 @@ export class Postman {
     this.ctx.store.setMailStatus(ids, "rung");
     const p = this.presence.get(agent)!;
     const rangAt = Date.now();
+    const deferred = bell.verify && bell.waitsForTurn && TURN_EXTRA_MS > 0 && rangAt - (p.lastSeenAt ?? 0) <= RECENT_TURN_MS;
+    const graceMs = WAKE_GRACE_MS + (deferred ? TURN_EXTRA_MS : 0);
+    if (deferred) for (const id of ids) this.deferredWakes.set(id, ids);
     p.lastRingAt = rangAt;
     p.lastRingKind = bell.kind;
     this.ctx.log("doorbell_ring", { agent, via: bell.kind, mails: ids });
@@ -172,12 +179,18 @@ export class Postman {
         if (o.ok) {
           if (o.note) this.ctx.log("doorbell_note", { agent, via: bell.kind, note: o.note });
           if (verification) setTimeout(() => {
-            if (!verification.disconnected) this.checkWake(agent, bell, ids, rangAt, nowTried, measured);
-          }, WAKE_GRACE_MS).unref();
+            this.releaseDeferredWake(ids);
+            if (!verification.disconnected) this.checkWake(agent, bell, ids, rangAt, graceMs, nowTried, measured);
+          }, graceMs).unref();
           return;
         }
+        this.releaseDeferredWake(ids);
         this.ringFailed(agent, bell, ids, o.error, nowTried, o.cooldown);
       });
+  }
+
+  private releaseDeferredWake(ids: string[]) {
+    for (const id of ids) if (this.deferredWakes.get(id) === ids) this.deferredWakes.delete(id);
   }
 
   /** A ring didn't go through: put the mail back and try the next doorbell in the chain. */
@@ -209,20 +222,18 @@ export class Postman {
    * already busy on a bridge task reads its mail when it gets to it. Otherwise try the next doorbell, and
    * when none is left, ask the human.
    */
-  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, tried: ReadonlySet<DoorbellKind>, measured: boolean) {
-    if ((this.presence.get(agent)?.lastSeenAt ?? 0) >= rangAt || this.isBusy(agent)) {
+  private checkWake(agent: string, bell: Doorbell, ids: string[], rangAt: number, graceMs: number, tried: ReadonlySet<DoorbellKind>, measured: boolean) {
+    const statuses = ids.map((id) => this.ctx.store.mail(id)?.status);
+    if ((this.presence.get(agent)?.lastSeenAt ?? 0) > rangAt || this.isBusy(agent) || statuses.some((s) => s === "fetched" || s === "acked")) {
       if (measured) this.doorbells.recordResult(agent, bell, "confirmed");
       return;
     }
-    const unread = ids.filter((id) => {
-      const st = this.ctx.store.mail(id)?.status;
-      return st === "rung" || st === "queued";
-    });
+    const unread = ids.filter((_, index) => statuses[index] === "rung" || statuses[index] === "queued");
     if (!unread.length) return;
     if (measured) this.doorbells.recordResult(agent, bell, "timeout");
     const unreported = unread.filter((id) => !this.wakeAlerts.has(id));
     if (!unreported.length) return;
-    this.ctx.log("wake_timeout", { agent, via: bell.kind, mails: unreported, graceMs: WAKE_GRACE_MS });
+    this.ctx.log("wake_timeout", { agent, via: bell.kind, mails: unreported, graceMs });
     const next = this.doorbells.pick(agent, tried);
     if (next) {
       this.ctx.event(null, agent, "doorbell", `${agent} 对「${bell.label}」没有反应，改用「${next.label}」`);
@@ -246,7 +257,7 @@ export class Postman {
       const lastReturn = this.presence.get(m.to_agent)?.lastReturnAt ?? 0;
       if (now - Math.max(Date.parse(m.rung_at!), lastReturn) < ring_retry_seconds * 1000) continue;
       // A delivered wake can be waiting in the client's queue while its current turn finishes.
-      if (this.isBusy(m.to_agent)) continue;
+      if (this.deferredWakes.has(m.id) || this.isBusy(m.to_agent)) continue;
       if (m.ring_count >= max_rings) {
         this.ctx.store.setMailStatus([m.id], "stuck");
         this.ctx.log("mail_stuck", { id: m.id, to: m.to_agent });
@@ -284,8 +295,11 @@ export class Postman {
       if (!this.wakeAlerts.has(m.id))
         this.ctx.notifyHuman("协作桥：需要你叫醒 " + m.to_agent, `${m.to_agent} 现在没有在等信。请在 ${m.to_agent} 里说「继续」。`);
     }
+    const ackTimeout = ack_timeout_seconds * 1000;
     for (const m of this.ctx.store.allMailByStatus(["fetched"])) {
-      if (!m.ack_required || m.overdue_flagged || now - Date.parse(m.fetched_at!) < ack_timeout_seconds * 1000) continue;
+      if (!m.ack_required || m.overdue_flagged || now - Date.parse(m.fetched_at!) < ackTimeout) continue;
+      if (m.kind === "task" && m.attempt_id && this.ctx.store.attempt(m.attempt_id)?.status === "in_progress"
+        && now - (this.presence.get(m.to_agent)?.lastSeenAt ?? 0) <= ackTimeout) continue;
       this.ctx.store.flagOverdue(m.id);
       this.ctx.log("ack_overdue", { id: m.id, to: m.to_agent });
       this.ctx.event(m.run_id, m.to_agent, "overdue", `${m.to_agent} 取走了「${m.subject}」但一直没有确认`);

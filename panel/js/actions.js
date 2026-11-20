@@ -20,13 +20,13 @@ const confirmations = {
   cancelMeeting: () => "取消当前会议？本轮未处理的邀请会作废。",
 };
 
-function payload(action, button, field) {
+function payload(action, button, field, area) {
   const value = field?.value ?? "";
   if (action === "answer") return { answer: value };
   if (action === "startRun") return { goal: value };
   if (action === "startMeeting") {
-    const participants = [...document.querySelectorAll("#participants input:checked")].map((el) => el.value);
-    return { topic: value, participants };
+    const participants = [...area.querySelectorAll("#participants input:checked")].map((el) => el.value);
+    return { topic: value, participants, facilitator: $("#facilitator", area).value || undefined };
   }
   return { action: button.dataset.value, note: value };
 }
@@ -54,12 +54,12 @@ export function createActions(refresh) {
       const response = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(chatBody ?? payload(action, button, field)),
+        body: JSON.stringify(chatBody ?? payload(action, button, field, area)),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result.error) throw new Error(result.error || "HTTP " + response.status);
-      if (field && previous === field.value) saveDraft(field, "");
-      return true;
+      if (field && previous === field.value && !["cancelMeeting", "stopRun", "release"].includes(action)) saveDraft(field, "");
+      return result;
     } catch (error) {
       showError(area, error);
       return false;

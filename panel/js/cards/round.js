@@ -1,4 +1,4 @@
-import { avatar, details, esc, list } from "../dom.js";
+import { avatar, details, esc, list, memberColor } from "../dom.js";
 import { roundActions, roundKind, waitingSpeakers } from "../model.js";
 import { label, postButton, timeTag } from "./common.js";
 
@@ -9,11 +9,11 @@ function planTable(tasks, final) {
       "</td><td>" + esc(t.paths.join("、") || "—") + "</td></tr>").join("") + "</tbody></table></div>";
 }
 
-function speaker(id, turn, agents, final) {
+function speaker(id, turn, agents, final, full) {
   let body = '<p class="muted">等待发言</p>';
   if (turn) {
     const text = esc(turn.content);
-    const short = turn.content.length <= 180;
+    const short = full || turn.content.length <= 180;
     const prose = '<p class="prose">' + (short ? text : esc(turn.content.slice(0, 180)) + "…") + "</p>";
     const decisions = turn.decisions.length ? "<h4>关键决策</h4>" + list(turn.decisions.map((d) => d.what + " — " + d.why)) : "";
     body = prose + (!short || decisions ? details("turn-" + id, short ? "查看关键决策" : "查看全文", '<div class="detail-body">' +
@@ -23,23 +23,23 @@ function speaker(id, turn, agents, final) {
       body += final ? table : details("plan-" + id, "查看任务草案", table);
     }
   }
-  return '<section class="speaker"><div class="speaker-head">' + avatar(id, agents) + "<strong>" + esc(id) + "</strong>" +
+  return '<section class="speech ' + memberColor(id) + (turn ? '' : ' waiting') + '"><div class="speaker-head">' + avatar(id, agents) + "<strong>" + esc(id) + "</strong>" +
     timeTag(turn?.at) + "</div>" + body + "</section>";
 }
 
-function controls(round, waiting) {
+function controls(round, waiting, showCancel) {
   const valid = roundActions(round);
   if (!valid.length) return;
   const id = round.meeting_id;
-  const cancel = postButton("cancelMeeting", id, "取消会议", { style: "danger" });
+  const cancel = showCancel ? postButton("cancelMeeting", id, "取消会议", { style: "danger" }) : "";
   if (valid.includes("approve")) {
     return {
       field: { key: "meeting-note-" + id + "-" + round.round, label: "定稿审批备注", placeholder: "批准备注或修改要求（可选）" },
       buttons: postButton("decideMeeting", id, "批准定稿并分派", { style: "primary", value: "approve" }) +
-        postButton("decideMeeting", id, "打回定稿", { style: "danger", value: "reject" }) + cancel,
+        postButton("decideMeeting", id, "打回定稿", { style: "danger", value: "reject", confirm: "打回定稿并请主持人重写？" }) + cancel,
     };
   }
-  if (!valid.includes("critique")) return { buttons: cancel };
+  if (!valid.includes("critique")) return cancel ? { buttons: cancel } : undefined;
   const prefix = waiting.length ? "跳过未发言者并" : "";
   const confirm = waiting.length ? "跳过 " + waiting.join("、") + " 的发言并结束本轮？" : "";
   return {
@@ -49,20 +49,26 @@ function controls(round, waiting) {
   };
 }
 
-export function roundCard(round, agents, { anchor, history = false, topic = false } = {}) {
+export function speakersFor(round, agents, full = false) {
+  const participants = round.status === "collecting" ? round.expected : round.turns.map((t) => t.agent);
+  return participants.length ? '<div class="speeches">' + participants.map((id) =>
+    speaker(id, round.turns.find((t) => t.agent === id), agents, round.kind === "final", full)).join("") + "</div>" : "";
+}
+
+export function roundCard(round, agents, { anchor, folder = false, topic = false, showSpeakers = true } = {}) {
   const heading = "第 " + round.round + " 轮 · " + roundKind[round.kind];
   const waiting = waitingSpeakers(round);
-  const participants = round.status === "collecting" ? round.expected : round.turns.map((t) => t.agent);
-  const speakers = participants.length ? '<div class="speaker-grid">' + participants.map((id) =>
-    speaker(id, round.turns.find((t) => t.agent === id), agents, round.kind === "final")).join("") + "</div>" : "";
+  const speakers = showSpeakers ? speakersFor(round, agents, folder) : "";
   const note = round.note ? '<p class="round-note prose"><strong>本轮意见</strong> ' + esc(round.note) + "</p>" : "";
   const minutes = round.doc_path ? '<p class="muted">会议纪要 <code>' + esc(round.doc_path) + "</code></p>" : "";
   const body = note + speakers + minutes;
   const key = "round-" + round.meeting_id + "-" + round.round;
-  if (history) {
-    const summary = "会议 #" + round.meeting_id + " · " + heading + " · " + round.turns.map((t) => t.agent).join("、");
-    return { key, anchor, className: "card history-round", body: details("round", summary, body, true) };
-  }
+  if (folder) return {
+    key, anchor, className: "rnd current-round",
+    heading: '<div class="round-head">' + label(heading, "run") + '<h3>当前轮</h3>' +
+      (waiting.length ? '<span class="wait-line">等待 ' + esc(waiting.join("、")) + " 发言</span>" : "") + "</div>",
+    control: controls(round, waiting, false), body,
+  };
   return {
     key, anchor, className: round.status === "awaiting_approval" || round.status === "review" ? "card decision-card" : "card round-card",
     heading: '<div class="row-meta">' + label("会议 #" + round.meeting_id) +
@@ -70,7 +76,7 @@ export function roundCard(round, agents, { anchor, history = false, topic = fals
       "<h3>" + esc(topic ? round.topic : heading) + "</h3>" +
       (topic ? '<p class="muted">' + esc(heading) + "</p>" : "") +
       (waiting.length ? '<p class="wait-line">等待 ' + esc(waiting.join("、")) + " 发言</p>" : ""),
-    control: controls(round, waiting),
+    control: controls(round, waiting, true),
     body,
   };
 }

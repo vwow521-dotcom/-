@@ -1,64 +1,41 @@
-import { $, avatar, details, esc, rows, since, time } from "../dom.js";
-import { meetingOpen, wakePhrase } from "../model.js";
-import { copyWakeButton, jump, label, postButton } from "../cards/common.js";
+import { $, avatar, content, details, esc, rows, time } from "../dom.js";
+import { activityTarget, folderTarget, meetingOpen, wakePhrase } from "../model.js";
+import { copyWakeButton, label, postButton } from "../cards/common.js";
+import { href, localButton, memberMessage, pill, scene, sceneKey, scenes, who } from "../visuals.js";
 
-const symbols = {
-  idle: "○", working: "▰", reviewing: "▤", meeting: "◆", awaiting_you: "▣",
-  unreachable: "!", offline: "×", "never-joined": "–", stale: "◷", unknown: "?",
-};
-
-function station(agent, ids) {
-  const { id, activity } = agent;
-  const state = activity.state;
-  const task = activity.link.view === "meeting" ? activity.link : { view: "meeting" };
-  return {
-    key: id, anchor: "member-" + id, className: "card station",
-    heading: '<div class="station-title">' + avatar(id, ids) + "<h3>" + esc(id) + "</h3>" +
-      label(activity.label, state === "unreachable" ? "bad" : "") + "</div>",
-    body: '<div class="station-art ' + esc(state) + '" aria-hidden="true"><div class="screen">' + esc(symbols[state]) +
-      '</div><div class="desk"></div></div><p class="evidence">' + esc(activity.evidence) + "</p>" +
-      (activity.since ? '<time class="muted" data-since datetime="' + esc(activity.since) + '" title="' + esc(time(activity.since)) + '">' +
-        since(activity.since) + '</time>' : '<span class="muted">暂无活动时间</span>') +
-      '<div class="button-row station-actions">' + jump(task, "看任务") +
-      '<button type="button" class="text-link" data-act="message" data-agent="' + esc(id) + '">发消息</button>' +
-      '<button type="button" class="text-link" data-act="member" data-agent="' + esc(id) + '">' +
-      (agent.hasDiagnosis || ["unreachable", "stale", "offline", "never-joined"].includes(state) ? "查看异常" : "成员详情") + "</button></div>",
-  };
-}
-
-export function renderOffice({ agents, meeting, approvals, diagnoses }) {
+export function renderOffice(snapshot) {
+  const { agents, meeting, timeline } = snapshot;
   const ids = agents.map((a) => a.id);
-  const tables = [];
-  if (meetingOpen(meeting)) {
-    tables.push({
-      key: "meeting-table", className: "card office-table meeting-table",
-      heading: '<h2>会议桌</h2><p class="prose">' + esc(meeting.topic) + "</p>",
-      body: '<div class="table-seats">' + meeting.participants.map((id) => '<span class="participant">' +
-        avatar(id, ids) + esc(id) + "</span>").join("") + "</div>" +
-        jump({ view: "meeting", anchor: "round-" + meeting.id + "-" + meeting.round }, "查看第 " + meeting.round + " 轮"),
-    });
-  }
-  if (approvals) {
-    tables.push({
-      key: "approvals", className: "card office-table approval-table",
-      heading: "<h2>审批桌</h2>",
-      body: '<button type="button" class="approval-stack" data-act="inbox" aria-haspopup="dialog">' +
-        '<span class="paper-stack" aria-hidden="true"></span><span>' + approvals + " 项待审批 →</span></button>",
-    });
-  }
-  for (const d of diagnoses) {
-    tables.push({
-      key: d.id, anchor: d.id, className: "card diagnostic-card",
-      heading: "<h3>" + esc(d.title) + "</h3>", body: '<p class="prose">' + esc(d.message) + "</p>",
-    });
-  }
-  rows($("#office-tables"), tables);
-  rows($("#office-stations"), agents.map((agent) => station(agent, ids)));
+  const desks = agents.map((a) => {
+    const link = activityTarget(a, snapshot);
+    const { activity } = a;
+    const [, icon, tone] = scene(a);
+    const detail = a.diagnostics?.length || ["unreachable", "stale", "offline", "never-joined"].includes(activity.state) ? "查看异常" : "成员详情";
+    return `<article class="desk st-${esc(sceneKey(a))}" id="member-${esc(a.id)}" tabindex="-1">
+      <div class="scene" aria-hidden="true">${icon}</div><div class="info">
+      <div class="nm">${who(a.id, ids)}${pill(activity.label, tone)}</div><p class="ev prose">${esc(activity.evidence)}</p><div class="acts">
+      ${link ? href(link, "看任务", { cls: "pillbtn ghost sm" }) : ""}${memberMessage(a.id)}
+      ${localButton("member", detail, { cls: "pillbtn ghost sm", attrs: `data-agent="${esc(a.id)}"` })}</div></div></article>`;
+  });
+  const [, meetingIcon] = scenes.meeting;
+  const open = meetingOpen(meeting);
+  desks.push(`<article class="desk st-meeting"><div class="scene" aria-hidden="true">${meetingIcon}</div><div class="info">
+    <div class="nm"><b>会议桌</b>${open ? pill("会议 #" + meeting.id + " · 第 " + meeting.round + " 轮", "run") : pill("空闲")}</div>
+    ${open ? `<p class="ev prose">${esc(meeting.topic)}</p>
+      <div class="acts">${href(folderTarget("m" + meeting.id, "discuss", "round-" + meeting.id + "-" + meeting.round),
+          "进入会议", { cls: "pillbtn ghost sm" })}</div>` : ""}</div></article>`);
+  const diagnoses = timeline.filter((d) => d.type === "diagnostic" && !d.agent).map((d) =>
+    `<article class="card" id="${esc(d.id)}" tabindex="-1"><h3>${esc(d.title)}</h3><p class="prose">${esc(d.message)}</p></article>`);
+  const legend = Object.entries(scenes).map(([key, [name, icon]]) =>
+    `<div class="lg st-${key}"><span class="sw" aria-hidden="true">${icon}</span>${name}</div>`).join("");
+  content($("#view-office"), `<div class="hero office-hero"><h1>办公室</h1></div><div class="pad"><div class="desks">
+    ${desks.join("")}</div>${diagnoses.join("")}<section class="sec"><div class="sec-h"><h2>状态图例</h2></div>
+    <div class="legend">${legend}</div></section></div>`);
 }
 
 export function renderMemberDetails(agent, ids, delivery) {
-  const container = $("#member-details");
-  $("#member-title").textContent = agent?.id ?? "成员详情";
+  const container = $("#member-detail");
+  $("#member-name").textContent = agent?.id ?? "成员详情";
   if (!agent) {
     rows(container, []);
     return;
@@ -89,7 +66,7 @@ export function renderMemberDetails(agent, ids, delivery) {
       (delivery ? '<p class="notice">' + esc(delivery.message) + "</p>" : ""),
     control: binding ? { buttons: postButton("release", id, "释放身份", { style: "danger" }) } : undefined,
     body: '<dl class="diagnostic-list">' + info.filter((entry) => entry[1]).map(([name, value]) =>
-      "<div><dt>" + esc(name) + "</dt><dd>" + esc(value) + "</dd></div>").join("") + "</dl>" +
+      "<dt>" + esc(name) + "</dt><dd>" + esc(value) + "</dd>").join("") + "</dl>" +
       (agent.doorbellError ? '<p class="bad prose">' + esc(agent.doorbellError) + "</p>" : "") +
       (diagnostics?.length ? '<ul class="detail-body">' + diagnostics.map((d) =>
         "<li>" + esc(d.message) + " · Codex " + esc(d.version) + "</li>").join("") + "</ul>" : "") +

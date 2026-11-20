@@ -170,7 +170,7 @@ export class Room {
     });
   }
 
-  private handoff(h: Handoff) {
+  handoff(h: Handoff) {
     const a = this.ctx.store.attempt(h.attempt_id);
     const task = a?.task_id ? this.ctx.store.task(a.task_id) : undefined;
     const multi = task ? this.ctx.store.tasks(task.run_id).length > 1 : false;

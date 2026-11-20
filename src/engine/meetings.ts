@@ -8,10 +8,10 @@ import { LIVE_MAIL, type Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
 import type { Scheduler } from "./scheduler.js";
 
-const KIND_LABEL: Record<MeetingTurnKind, string> = { proposal: "提案", critique: "互评", final: "定稿" };
+export const KIND_LABEL: Record<MeetingTurnKind, string> = { proposal: "提案", critique: "互评", final: "定稿" };
 const sentences = new Intl.Segmenter("zh", { granularity: "sentence" });
 
-function summarizeTurn(content: string) {
+export function summarizeTurn(content: string) {
   const lines = content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const line = lines.find((text) => !/^#{1,6}\s/.test(text)) ?? lines[0] ?? "";
   const prose = line.replace(/^(?:[-*+>]|#{1,6}|\d+[.)])\s+/, "");
@@ -285,10 +285,13 @@ export class Meetings {
 
   private minutesPath(m: Meeting) {
     const day = new Date().toISOString().slice(0, 10);
-    const slug = m.topic.replace(/[<>:"/\\|?*\u0000-\u001f#%]/g, "").trim().replace(/\s+/g, "-").slice(0, 40) || `meeting-${m.id}`;
+    const topic = m.topic.replace(/[\p{Ps}\p{Pe}\p{Pi}\p{Pf}"'<>＂＇\u2460-\u249b\u24ea-\u24ff\u2776-\u2793]/gu, "");
+    const head = topic.split(/[\p{P}|*\u0000-\u001f]/u, 1)[0].trim().replace(/\s+/g, "-");
+    const slug = [...head].slice(0, 24).join("").replace(/-+$/, "");
     const dir = this.ctx.cfg.meetings.dir.replace(/\\/g, "/").replace(/\/+$/, "");
-    let rel = `${dir}/${day}-${slug}.md`;
-    if (fs.existsSync(path.join(this.ctx.cfg.projectDir, rel))) rel = `${dir}/${day}-${slug}-${m.id}.md`;
+    const stem = `${dir}/${day}-m${m.id}${slug ? "-" + slug : ""}`;
+    let rel = `${stem}.md`;
+    for (let suffix = 2; fs.existsSync(path.join(this.ctx.cfg.projectDir, rel)); suffix++) rel = `${stem}-${suffix}.md`;
     return rel;
   }
 

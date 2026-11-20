@@ -36,6 +36,8 @@ export interface Doorbell {
   readonly sessionless: boolean;
   /** Check for a sign of life after ringing, and fall through / alert if there is none. */
   readonly verify: boolean;
+  /** A successful ring may sit in the client queue until its current turn ends. */
+  readonly waitsForTurn?: boolean;
   /** Could this doorbell serve the agent at all? Decides what `join` tells the agent about waiting. */
   possible(agent: string): boolean;
   /** Can it deliver to the agent right now? */

@@ -1,5 +1,7 @@
 const rendered = new WeakMap();
 const drafts = new Map();
+let draftPrefix = "bridge.draft.";
+try { draftPrefix += (sessionStorage.getItem("bridge.draftProject") ?? "") + "."; } catch { /* Optional storage. */ }
 
 export const $ = (selector, root = document) => root.querySelector(selector);
 export const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -14,6 +16,7 @@ export function content(element, html = "") {
     if (details.has(d.dataset.detail)) d.open = details.get(d.dataset.detail);
   }
   restoreCopyFallbacks(element, copies, focused);
+  restoreDrafts(element);
   rendered.set(element, html);
 }
 
@@ -81,11 +84,32 @@ function restoreCopyFallbacks(element, tokens, focused) {
   for (const token of copyFallbacks.keys()) if (!findCopyBox(token)) copyFallbacks.delete(token);
 }
 
-// The same question or approval can appear in a view and in the drawer.
+function draft(key) {
+  if (drafts.has(key)) return drafts.get(key);
+  try { return sessionStorage.getItem(draftPrefix + key) ?? ""; } catch { return ""; }
+}
+
+export function restoreDrafts(root) {
+  for (const field of root.querySelectorAll("[data-keep]")) field.value = draft(field.dataset.keep);
+}
+
+export function setDraftProject(project) {
+  const prefix = "bridge.draft." + project + ".";
+  if (prefix === draftPrefix) return;
+  drafts.clear();
+  draftPrefix = prefix;
+  try { sessionStorage.setItem("bridge.draftProject", project); } catch { /* Optional storage. */ }
+  restoreDrafts(document);
+}
+
+// A tab keeps its drafts across reloads and syncs copies of a shared control.
 export function saveDraft(field, value = field.value) {
   const key = field.dataset.keep;
-  if (value) drafts.set(key, value);
-  else drafts.delete(key);
+  drafts.set(key, value);
+  try {
+    if (value) sessionStorage.setItem(draftPrefix + key, value);
+    else sessionStorage.removeItem(draftPrefix + key);
+  } catch { /* The in-memory draft is still available. */ }
   for (const peer of document.querySelectorAll("[data-keep]")) {
     if (peer.dataset.keep === key && peer.value !== value) peer.value = value;
   }
@@ -108,10 +132,11 @@ function renderControl(element, control) {
     const input = field && document.createElement(field.inline ? "input" : "textarea");
     if (input) {
       input.dataset.keep = field.key;
+      if (field.inline) input.className = "field";
       input.placeholder = field.placeholder;
       input.setAttribute("aria-label", field.label);
       if (!field.inline) input.rows = 2;
-      input.value = drafts.get(field.key) ?? "";
+      input.value = draft(field.key);
     }
     fieldArea.replaceChildren(...(input ? [input] : []));
     showError(element, null);
@@ -142,6 +167,9 @@ function renderRow(element, row) {
 
 // Stable row keys prevent unrelated refreshes from replacing editable controls or open cards.
 export function rows(container, data) {
+  const focused = document.activeElement;
+  const editable = container.contains(focused) && focused.matches("[data-keep]");
+  const selection = editable && [focused.selectionStart, focused.selectionEnd, focused.selectionDirection];
   const keys = new Set(data.map((row) => String(row.key)));
   const existing = new Map();
   for (const row of [...container.children]) {
@@ -164,6 +192,10 @@ export function rows(container, data) {
     }
     renderRow(element, row);
     next = element.nextElementSibling;
+  }
+  if (selection && document.activeElement !== focused && focused.isConnected && focused.getClientRects().length) {
+    focused.focus({ preventScroll: true });
+    if (selection[0] !== null) focused.setSelectionRange(...selection);
   }
 }
 
@@ -190,13 +222,13 @@ export function day(iso) {
   return date.toLocaleDateString("zh-CN");
 }
 
-const colors = ["amber", "green", "blue", "berry", "olive", "violet"];
+export const memberColor = (id) => ["claude", "codex", "human"].includes(id) ? id : "unknown";
 export function avatar(id, ids) {
   const name = id === "human" ? "你" : id;
   const first = name.slice(0, 1);
   const shared = ids.some((other) => other !== id && other[0]?.toLowerCase() === first.toLowerCase());
-  const color = id === "human" ? "human" : colors[Math.max(0, ids.indexOf(id)) % colors.length];
-  return '<span class="avatar ' + color + '" aria-hidden="true">' + esc(first.toUpperCase() + (shared ? name.slice(1, 2) : "")) + "</span>";
+  const letter = id === "codex" ? "X" : first.toUpperCase() + (shared ? name.slice(1, 2) : "");
+  return '<span class="av ' + memberColor(id) + '" aria-hidden="true">' + esc(letter) + "</span>";
 }
 
 export const list = (items) => items?.length ? "<ul>" + items.map((text) => "<li>" + esc(text) + "</li>").join("") + "</ul>" : "";

@@ -53,7 +53,6 @@ export function meetingOpen(meeting) {
 }
 
 export const roundKind = { proposal: "提案", critique: "互评", final: "定稿" };
-export const meetingStatus = { collecting: "发言中", review: "待你决定下一步", awaiting_approval: "定稿待批准", done: "已批准", cancelled: "已取消" };
 
 export function waitingSpeakers(round) {
   if (round.status !== "collecting") return [];
@@ -70,16 +69,6 @@ export function roundActions(round) {
   return [];
 }
 
-export function timelineTarget(it) {
-  if (it.type === "round") return { view: "meeting", anchor: "round-" + it.meeting_id + "-" + it.round };
-  if (it.type === "handoff") return { view: "meeting", anchor: "handoff-" + it.id };
-  if (it.type === "question") return { view: "chat", anchor: "question-" + it.id };
-  if (it.type === "delivery") return { view: "office", anchor: "member-" + it.agent };
-  if (it.type === "diagnostic") return { view: "office", anchor: it.agent ? "member-" + it.agent : it.id };
-  if (it.type === "sys") return { view: "meeting", anchor: "event-" + it.id };
-  return { view: "chat", anchor: "message-" + it.id };
-}
-
 export function wakePhrase(agent, product) {
   if (product === "claude-code") return "/bridge";
   if (product === "codex") return "$bridge";
@@ -90,37 +79,60 @@ function timelineKey(it) {
   return it.type === "round" ? "round/" + it.meeting_id + "/" + it.round : it.type + "/" + it.id;
 }
 
-export function splitTimeline(timeline, chat = []) {
-  const context = new Map(timeline.map((it) => [timelineKey(it), it]));
+export function chatMessages(timeline, chat) {
   const messages = new Map(chat.map((it) => [it.id, it]));
-  const rounds = [];
-  const handoffs = [];
-  const events = [];
-  for (const it of timeline) {
-    if (it.type === "chat") messages.set(it.id, it);
-    else if (it.type === "round") rounds.push(it);
-    else if (it.type === "handoff") handoffs.push(it);
-    else if (it.type === "sys" && (it.cat === "task" || it.cat === "meeting")) events.push(it);
+  for (const it of timeline) if (it.type === "chat") messages.set(it.id, it);
+  return messages;
+}
+
+export function folderTarget(id, tab, anchor, before) {
+  return { view: "folder", id, tab, anchor, before };
+}
+
+export function runFolder(run) {
+  return run.meeting_id ? "m" + run.meeting_id : "r" + run.id;
+}
+
+export function runTarget(snapshot, runId) {
+  const run = snapshot.run?.id === runId ? snapshot.run : snapshot.recentRuns.find((r) => r.id === runId);
+  return run ? runFolder(run) : "r" + runId;
+}
+
+export function officeTarget(id) {
+  return { view: "office", anchor: id ? "member-" + id : "" };
+}
+
+export function playingTarget(item, snapshot) {
+  if (item.attempt_id === null) {
+    return folderTarget(item.folder, "discuss", "round-" + item.folder.slice(1) + "-" + snapshot.meeting?.round);
   }
-  return { context, messages, rounds, handoffs, events };
+  const a = snapshot.lives.find((attempt) => attempt.id === item.attempt_id);
+  if (a?.status === "awaiting_approval" && a.handoff_id) return folderTarget(item.folder, "handoffs", "handoff-" + a.handoff_id);
+  return folderTarget(item.folder, "tasks", a && "task-" + a.task_id);
 }
 
-export function resolveInbox(inbox, timeline) {
-  return ["high", "normal"].map((urgency) => ({
-    urgency,
-    items: inbox.filter((item) => item.urgency === urgency).map((item) => ({
-      ...item, context: timeline.context.get(timelineKey(item.ref)),
-    })),
-  })).filter((group) => group.items.length);
+export function activityTarget(agent, snapshot) {
+  const link = agent.activity.link;
+  if (link.view !== "meeting") return null;
+  const round = /^round-(\d+)-/.exec(link.anchor);
+  if (round) return folderTarget("m" + round[1], "discuss", link.anchor);
+  if (!snapshot.run) return null;
+  return folderTarget(runFolder(snapshot.run), link.anchor.startsWith("handoff-") ? "handoffs" : "tasks", link.anchor);
 }
 
-export function currentRound(meeting, rounds) {
-  const round = rounds.find((it) => it.meeting_id === meeting.id && it.round === meeting.round);
-  if (round) return round;
-  // An active round can have no turns yet and therefore no historical timeline card.
-  return {
-    type: "round", meeting_id: meeting.id, round: meeting.round, kind: meeting.round_kind,
-    topic: meeting.topic, facilitator: meeting.facilitator, turns: [],
-    status: meetingOpen(meeting) ? meeting.status : null, expected: meeting.expected, note: meeting.round_note,
-  };
+export function inboxContexts(snapshot) {
+  const context = new Map(snapshot.timeline.map((it) => [timelineKey(it), it]));
+  return snapshot.inbox.map((item) => ({ ...item, context: context.get(timelineKey(item.ref)) }));
+}
+
+export function rejectStage(item, tasks) {
+  const stage = item.gate?.reject_to;
+  return tasks.find((task) => task.id === item.task_id)?.stages.find((s) => s.id === stage)?.role ?? stage;
+}
+
+export function inboxTarget(item, snapshot) {
+  const it = item.context;
+  if (it?.type === "round") return folderTarget("m" + it.meeting_id, "discuss", item.target.anchor);
+  if (it?.type === "handoff") return folderTarget(runTarget(snapshot, it.run_id), "handoffs", item.target.anchor);
+  return item.target;
 }

@@ -222,8 +222,51 @@ export interface BridgeEvent {
   created_at: string;
 }
 
+export interface FolderRow {
+  id: string;
+  kind: "meeting" | "run";
+  number: number;
+  title: string;
+  status: RunStatus | MeetingStatus;
+  run_id: number | null;
+  updated_at: string;
+  rounds: number;
+  tasks: number;
+  done: number;
+  handoffs: number;
+}
+
 const now = () => new Date().toISOString();
 type Arg = string | number | null;
+
+// Older meeting events have no run_id. Their text contains the meeting number followed by a space.
+const meetingEvent = (id: string) => `kind = 'meeting' AND instr(text, '会议 #' || ${id} || ' ') > 0`;
+const folderList = `WITH run_activity AS (
+  SELECT run_id, MAX(at) AS updated_at FROM (
+    SELECT run_id, created_at AS at FROM events WHERE run_id IS NOT NULL
+    UNION ALL SELECT run_id, created_at FROM handoffs
+    UNION ALL SELECT run_id, MAX(assigned_at, COALESCE(started_at, ''), COALESCE(ended_at, '')) FROM attempts
+  ) GROUP BY run_id
+), folders AS (
+  SELECT 'm' || m.id AS id, 'meeting' AS kind, m.id AS number, m.topic AS title,
+    COALESCE(r.status, m.status) AS status, r.id AS run_id, m.round AS rounds,
+    MAX(m.created_at, COALESCE(m.ended_at, ''), COALESCE(r.ended_at, ''),
+      COALESCE(r.created_at, ''), COALESCE(a.updated_at, ''),
+      COALESCE((SELECT MAX(created_at) FROM events WHERE ${meetingEvent("m.id")}), ''),
+      COALESCE((SELECT MAX(created_at) FROM meeting_turns WHERE meeting_id = m.id), '')) AS updated_at
+  FROM meetings m LEFT JOIN runs r ON r.id = m.run_id
+    LEFT JOIN run_activity a ON a.run_id = r.id
+  UNION ALL
+  SELECT 'r' || r.id, 'run', r.id, r.goal, r.status, r.id, 0,
+    MAX(r.created_at, COALESCE(r.ended_at, ''), COALESCE(a.updated_at, ''))
+  FROM runs r LEFT JOIN run_activity a ON a.run_id = r.id
+  WHERE r.meeting_id IS NULL AND NOT EXISTS (SELECT 1 FROM meetings WHERE run_id = r.id)
+)
+SELECT f.*,
+  (SELECT COUNT(*) FROM tasks WHERE run_id = f.run_id) AS tasks,
+  (SELECT COUNT(*) FROM tasks WHERE run_id = f.run_id AND status = 'done') AS done,
+  (SELECT COUNT(*) FROM handoffs WHERE run_id = f.run_id) AS handoffs
+FROM folders f`;
 
 export class Store {
   readonly db: DatabaseSync;
@@ -409,6 +452,14 @@ export class Store {
   recentRuns(limit = 10) {
     return this.all<Run>("SELECT * FROM runs ORDER BY id DESC LIMIT ?", limit);
   }
+  folderRows(limit: number, before?: { at: string; id: string }) {
+    const args: Arg[] = before ? [before.at, before.id] : [];
+    const where = before ? "WHERE (f.updated_at, f.id) < (?, ?)" : "";
+    return this.all<FolderRow>(`${folderList} ${where} ORDER BY f.updated_at DESC, f.id DESC LIMIT ?`, ...args, limit);
+  }
+  folderRow(id: string) {
+    return this.one<FolderRow>(`${folderList} WHERE f.id = ?`, id);
+  }
   setRunStatus(id: number, status: RunStatus) {
     const ended = status === "done" || status === "stopped" ? now() : null;
     this.exec("UPDATE runs SET status = ?, ended_at = COALESCE(?, ended_at) WHERE id = ?", status, ended, id);
@@ -504,6 +555,17 @@ export class Store {
   }
   handoffs(run_id: number): Handoff[] {
     return this.all<any>("SELECT * FROM handoffs WHERE run_id = ? ORDER BY id", run_id).map((r) => this.parseHandoff(r));
+  }
+  gateHandoffs(runId: number) {
+    return this.all<any>(`SELECT h.* FROM handoffs h JOIN attempts a ON h.attempt_id = a.id
+      WHERE h.run_id = ? AND a.status = 'awaiting_approval' ORDER BY h.id DESC`, runId).map((row) => this.parseHandoff(row));
+  }
+  handoffHistory(runId: number, limit: number, before: number) {
+    const where = `FROM handoffs h WHERE h.run_id = ? AND h.id < ?
+      AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.id = h.attempt_id AND a.status = 'awaiting_approval')`;
+    const items = this.all<any>(`SELECT h.* ${where} ORDER BY h.id DESC LIMIT ?`, runId, before, limit).map((row) => this.parseHandoff(row));
+    const count = this.one<{ count: number }>(`SELECT COUNT(*) AS count ${where}`, runId, before)!.count;
+    return { items, count };
   }
   taskHandoffs(task_id: number): Handoff[] {
     return this.all<any>("SELECT h.* FROM handoffs h JOIN attempts a ON a.id = h.attempt_id WHERE a.task_id = ? ORDER BY h.id", task_id).map((r) =>
@@ -627,5 +689,9 @@ export class Store {
   }
   recentEvents(limit = 50) {
     return this.all<BridgeEvent>("SELECT * FROM events ORDER BY id DESC LIMIT ?", limit);
+  }
+  folderEvents(runId: number | null, meetingId: number | null, limit = 40) {
+    return this.all<BridgeEvent>(`SELECT * FROM events WHERE run_id = ? OR (${meetingEvent("?")})
+      ORDER BY id DESC LIMIT ?`, runId, meetingId, limit);
   }
 }

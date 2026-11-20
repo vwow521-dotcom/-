@@ -356,3 +356,11 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
 - **唤醒统计与降级**。`Doorbells` 注册表按成员和驱动记录响铃、确认与异常，快照提供 `agents[].doorbellStats`。使用已有队列唤醒的去重请求不计新响铃。可验证门铃以宽限期内的工具调用或成员正在工作作为确认信号。0.8.1 在当前连续异常序列里分开记录响铃失败（`ringFailuresInStreak`）和响铃后未确认（`unconfirmedInStreak`），Office 用分项生成提示。`consecutiveFailures` 是两类的合计，达到 `doorbells.max_unconfirmed_rings`（默认 3）时跳过该门铃 `doorbells.cooldown_seconds` 秒（默认 600），按原顺序选择下一个可用门铃。队列执行失败会立即降级。确认、交付或冷却结束时清零连续计数，`failed` 记录两类异常的累计次数。降级和恢复各记一次事件，恢复后重试仍排队的信。
 - **安装版本比较**。提交不同时，`doctor` 使用 GitHub Compare API 以 GitHub main 为基准、安装提交为比较对象。只有 `behind` 建议更新。安装提交在 GitHub 尚不可比较时，报告无法判断。 [GitHub Compare API](https://docs.github.com/en/rest/commits/commits#compare-two-commits)
 
+## 22. P3 工作区与面板（0.9.0）
+
+- **文件夹**。每场会议使用 `m<id>`，批准后生成的运行归在原文件夹。直接流水线使用 `r<id>`。`GET /api/folders?limit=&before=` 按最近活动倒序，用时间和文件夹 ID 组成游标。`/api/folders/:id` 返回任务、阶段和关联事件，当前会议轮返回全文，历史轮返回摘要。用 `?round=` 取对应历史轮全文。交接每页 20 条，首页优先显示待审批项。待审批项本身超过 20 条时，首页完整显示待审批项。
+- **状态**。`/api/state` 增加 `folders_head` 和 `now_playing`。文件夹的待处理计数来自 `inbox`。底栏依次优先显示待审批、已领取和待领取的阶段，再到欠发言的轮次。分段条显示当前阶段和开始至今的时间。
+- **界面**。`#/home` 展示快捷入口和近期工作，`#/f/<id>` 用 `tab` 与 `anchor` 直接定位。顶栏进入办公室和聊天。详情和待处理共用右栏，窄屏浮动，手机占满主区。主题在手动选择前跟随系统。`data-keep` 草稿按项目保存在本标签页的会话存储中。
+- **刷新**。SSE 更新 `/api/state` 和当前文件夹。导航和读取历史页使用 GET，提交沿用原 POST。`/v1` 和 `/classic` 继续提供旧面板。
+- **误报和启动**。执行中的任务信在确认窗口内有工具活动时延后提醒。队列门铃在最近 60 秒有工具调用时增加默认 90 秒宽限，由 `BRIDGE_WAKE_TURN_EXTRA_SECONDS` 配置，期间重试扫描也会等待。新纪要使用 `<日期>-m<会议号>-<短标题>.md`。端口占用时 `start` 返回非零，若能读取已有桥的状态则提示该项目和面板。
+

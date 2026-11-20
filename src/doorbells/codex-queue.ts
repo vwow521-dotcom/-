@@ -22,6 +22,7 @@ export class CodexQueueDoorbell implements Doorbell {
   readonly label = "Codex 队列消息";
   readonly sessionless = true;
   readonly verify = true;
+  readonly waitsForTurn = true;
   private cmd: string[] | null = null;
   private cmdCheckedAt = 0;
   // `codex queue` takes a few seconds; a second ring meanwhile would stack another wake (run #6: an empty turn).

@@ -5,6 +5,7 @@ import type { Chat } from "./chat.js";
 import type { DeliveryNotice, Room } from "./room.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import type { Diagnostics } from "./diagnostics.js";
+import { Folders, isOpenRun, taskStates, type FolderCursor } from "./folders.js";
 import type { Leases } from "./leases.js";
 import type { Meetings } from "./meetings.js";
 import { LIVE_MAIL, type Postman } from "./postman.js";
@@ -12,6 +13,8 @@ import type { Presence } from "./presence.js";
 import type { Scheduler } from "./scheduler.js";
 
 export class Workspace {
+  private readonly folders: Folders;
+
   constructor(
     private readonly ctx: EngineContext,
     private readonly presence: Presence,
@@ -23,7 +26,9 @@ export class Workspace {
     private readonly room: Room,
     private readonly doorbells: Doorbells,
     private readonly diagnostics: Diagnostics,
-  ) {}
+  ) {
+    this.folders = new Folders(ctx, meetings, room, scheduler);
+  }
 
   getContext(agent: string, sessionId: string | undefined, lastN = 3): Result {
     const be = this.presence.bindingError(agent, sessionId);
@@ -116,6 +121,28 @@ export class Workspace {
   }
 
   snapshot() {
+    const panel = this.readPanel();
+    const { nowPlaying, needs } = this.folderState(panel);
+    return { ...panel, folders_head: this.folders.page(8, needs).folders, now_playing: nowPlaying };
+  }
+
+  folderPage(limit: number, before?: FolderCursor) {
+    const { needs } = this.folderState(this.readPanel());
+    return this.folders.page(limit, needs, before);
+  }
+
+  folderDetail(id: string, round?: number, handoffsBefore?: number) {
+    const { needs } = this.folderState(this.readPanel());
+    return this.folders.detail(id, needs.get(id) ?? 0, round, handoffsBefore);
+  }
+
+  private folderState(panel: ReturnType<Workspace["readPanel"]>) {
+    const nowPlaying = this.folders.nowPlaying(panel.run, panel.tasks, panel.lives, panel.meeting);
+    const needs = this.folders.needs(panel.inbox, panel.timeline, panel.questions, nowPlaying);
+    return { nowPlaying, needs };
+  }
+
+  private readPanel() {
     const run = this.ctx.store.openRun() ?? this.ctx.store.recentRuns(1)[0];
     const attempts = run ? this.ctx.store.attempts(run.id) : [];
     const live = run ? this.ctx.store.liveAttempt(run.id) : undefined;
@@ -123,7 +150,7 @@ export class Workspace {
     const handoffs = run ? this.ctx.store.handoffs(run.id) : [];
     const tasks = run ? this.ctx.store.tasks(run.id) : [];
     const keyOf = (id: number | null) => (id ? tasks.find((t) => t.id === id)?.key ?? null : null);
-    const runOpen = run?.status === "active" || run?.status === "awaiting_approval";
+    const runOpen = isOpenRun(run);
     const waitingForTurn = new Set<string>();
     const openMeeting = this.ctx.store.openMeeting();
     const meeting = openMeeting ?? this.ctx.store.recentMeetings(1)[0];
@@ -244,16 +271,7 @@ export class Workspace {
       attempts,
       live: live ?? null,
       lives,
-      tasks: tasks.map((t) => {
-        const la = this.ctx.store.taskLiveAttempt(t.id);
-        const deps = t.depends_on.filter((k) => tasks.find((x) => x.key === k)?.status !== "done");
-        return {
-          ...t,
-          live: la ?? null,
-          rounds: attempts.filter((a) => a.task_id === t.id).length,
-          waiting: t.status === "pending" ? (deps.length ? `等 ${deps.join("、")}` : (this.scheduler.taskWait(t.id) ?? null)) : null,
-        };
-      }),
+      tasks: taskStates(tasks, attempts, this.scheduler),
       leases: this.ctx.store.openLeases().map((l) => ({ ...l, task: keyOf(l.task_id), expired: !!l.expires_at && Date.parse(l.expires_at) <= now })),
       meeting: meeting
         ? {

@@ -4,12 +4,14 @@ import express from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.js";
 import { Store } from "./store.js";
 import { Engine } from "./engine.js";
+import { parseFolderCursor } from "./engine/folders.js";
 import { buildServer } from "./mcp.js";
 import type { BridgeClient } from "./products/types.js";
 import { isRepo, dirtyFiles, show } from "./git.js";
@@ -35,15 +37,8 @@ try {
   console.error((e as Error).message);
   process.exit(1);
 }
-const store = new Store(projectDir);
-const engine = new Engine(cfg, store);
-engine.context.notifyHuman = (title, body) => {
-  if (cfg.notify.enabled) toast(title, body, `http://127.0.0.1:${PORT}/`);
-};
-
 // ---------- MCP endpoint ----------
 const transports = new Map<string, StreamableHTTPServerTransport>();
-engine.presence.isSessionOpen = (id) => transports.has(id);
 
 const app = express();
 app.use(express.json({ limit: "4mb" }));
@@ -98,13 +93,6 @@ app.delete("/mcp", sessionRequest);
 // ---------- panel + JSON API ----------
 const sseClients = new Set<express.Response>();
 let changeTimer: NodeJS.Timeout | null = null;
-engine.context.onChange = () => {
-  if (changeTimer) return; // coalesce bursts
-  changeTimer = setTimeout(() => {
-    changeTimer = null;
-    for (const c of sseClients) c.write("data: change\n\n");
-  }, 150);
-};
 
 // Static panel assets live next to src/ and dist/. Both earlier panels remain available.
 const PANEL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "panel");
@@ -117,6 +105,28 @@ app.get("/classic", (_req, res) => {
 
 app.get("/api/state", async (_req, res) => {
   res.json({ ...engine.workspace.snapshot(), git: { repo: await isRepo(projectDir), dirty: (await dirtyFiles(projectDir)).length } });
+});
+function queryId(value: unknown) {
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
+}
+app.get("/api/folders", (req, res) => {
+  const limit = req.query.limit === undefined ? 20 : queryId(req.query.limit);
+  const before = typeof req.query.before === "string" ? parseFolderCursor(req.query.before) : null;
+  if (limit === null || limit > 100 || (req.query.before !== undefined && !before))
+    return void res.status(400).json({ error: "文件夹分页参数无效。" });
+  res.json(engine.workspace.folderPage(limit, before ?? undefined));
+});
+app.get("/api/folders/:id", (req, res) => {
+  if (!/^[mr][1-9]\d*$/.test(req.params.id)) return void res.status(404).json({ error: "文件夹不存在。" });
+  const round = queryId(req.query.round);
+  const before = queryId(req.query.handoffs_before);
+  if ((req.query.round !== undefined && round === null) || (req.query.handoffs_before !== undefined && before === null))
+    return void res.status(400).json({ error: "轮次或交接分页参数无效。" });
+  const folder = engine.workspace.folderDetail(req.params.id, round ?? undefined, before ?? undefined);
+  if (!folder) return void res.status(404).json({ error: "文件夹不存在。" });
+  res.json(folder);
 });
 
 app.get("/api/stream", (req, res) => {
@@ -228,11 +238,50 @@ app.get("/api/commits/:sha", async (req, res) => {
   res.type("text/plain; charset=utf-8").send(await show(projectDir, req.params.sha));
 });
 
-app.listen(PORT, "127.0.0.1", async () => {
-  engine.context.log("server_start", { port: PORT, project: projectDir, config: cfg.source, pollSeconds: cfg.wait.poll_seconds });
-  const repo = await isRepo(projectDir);
-  console.log(`项目:  ${projectDir}${repo ? "" : "  （警告：不是 git 仓库，交接不会自动提交）"}`);
-  console.log(`配置:  ${cfg.source}`);
-  console.log(`MCP:   http://127.0.0.1:${PORT}/mcp`);
-  console.log(`面板:  http://127.0.0.1:${PORT}/`);
-});
+const server = createServer(app);
+try {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(PORT, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+    const url = `http://127.0.0.1:${PORT}`;
+    let existing: unknown;
+    try {
+      const response = await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(2000) });
+      if (response.ok) existing = (await response.json()).project;
+    } catch { /* The port may belong to another service. */ }
+    console.error(`端口 ${PORT} 已被占用（EADDRINUSE）。`);
+    if (typeof existing === "string") console.error(`已有协作桥正在运行，项目为 ${existing}，面板为 ${url}/。`);
+    console.error("如需另起实例，请用 ai-bridge start <项目目录> --port <空闲端口>。");
+  } else {
+    console.error(`无法监听端口 ${PORT}：${(error as Error).message}`);
+  }
+  process.exit(1);
+}
+
+const address = server.address();
+const port = typeof address === "object" && address ? address.port : PORT;
+const engine = new Engine(cfg, new Store(projectDir));
+engine.presence.isSessionOpen = (id) => transports.has(id);
+engine.context.notifyHuman = (title, body) => {
+  if (cfg.notify.enabled) toast(title, body, `http://127.0.0.1:${port}/`);
+};
+engine.context.onChange = () => {
+  if (changeTimer) return; // coalesce bursts
+  changeTimer = setTimeout(() => {
+    changeTimer = null;
+    for (const c of sseClients) c.write("data: change\n\n");
+  }, 150);
+};
+
+engine.context.log("server_start", { port, project: projectDir, config: cfg.source, pollSeconds: cfg.wait.poll_seconds });
+const repo = await isRepo(projectDir);
+console.log(`项目:  ${projectDir}${repo ? "" : "  （警告：不是 git 仓库，交接不会自动提交）"}`);
+console.log(`配置:  ${cfg.source}`);
+console.log(`MCP:   http://127.0.0.1:${port}/mcp`);
+console.log(`面板:  http://127.0.0.1:${port}/`);

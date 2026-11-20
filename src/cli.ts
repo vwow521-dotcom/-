@@ -302,6 +302,7 @@ function help() {
   ai-bridge init <目录>           准备一个项目：bridge.config.yaml、git
   ai-bridge start [目录] [--port 7878]
                                   为项目启动协作桥（面板 http://127.0.0.1:7878/）
+                                  端口已被占用时请使用已有面板或另选空闲端口
   ai-bridge doctor                检查配置是否一致、安装是否和 GitHub 上的最新版一致
   ai-bridge doctor --probe        只读检查门铃命令、数据格式和代理套接字报告
   ai-bridge update [--ref <分支|标签|提交>] [--force]

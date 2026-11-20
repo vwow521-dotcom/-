@@ -5,7 +5,7 @@ function block(title, content) {
   return content ? "<h4>" + esc(title) + "</h4>" + content : "";
 }
 
-export function handoffCard(item, anchor) {
+export function handoffCard(item, anchor, rejectStage) {
   const { data, gate } = item;
   const stage = [item.task?.key, item.stage_role].filter(Boolean).join(" ");
   const verdict = data.verdict === "approve" ? label("审查通过", "good") : data.verdict === "reject" ? label("建议打回", "bad") : "";
@@ -31,11 +31,12 @@ export function handoffCard(item, anchor) {
     const approve = postButton("decide", gate.attempt_id, gate.reject_first ? "仍然通过" : "批准", {
       value: "approve", style: gate.reject_first ? "" : "primary",
     });
-    const reject = postButton("decide", gate.attempt_id, (gate.reject_first ? "确认打回" : "打回") + "到「" + gate.reject_to + "」", {
-      value: "reject", style: "danger",
+    const stage = rejectStage ?? gate.reject_to;
+    const reject = postButton("decide", gate.attempt_id, (gate.reject_first ? "确认打回" : "打回") + "到「" + stage + "」", {
+      value: "reject", style: "danger", confirm: "打回这份交接并重新分派「" + stage + "」？",
     });
     control = {
-      field: { key: "gate-" + gate.attempt_id, label: "交接审批备注", placeholder: "审批备注或修改要求（可选）" },
+      field: { key: "gate-" + gate.attempt_id, label: "交接审批备注", placeholder: "备注或修改要求（可选）", inline: true },
       buttons: gate.reject_first ? reject + approve : approve + reject,
     };
   }
