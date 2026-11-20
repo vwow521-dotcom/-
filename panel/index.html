@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Bridge 协作面板</title>
+  <link rel="stylesheet" href="/panel/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="project" aria-label="当前项目">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div class="project-name">
+        <span class="brand">AI Bridge</span>
+        <strong id="project">协作面板</strong>
+      </div>
+    </div>
+    <nav class="nav" aria-label="视图">
+      <a href="#/chat" data-view="chat" aria-label="Chat 聊天室" aria-current="page">Chat</a>
+      <a href="#/meeting" data-view="meeting" aria-label="Meeting 会议室">Meeting</a>
+      <a href="#/office" data-view="office" aria-label="Office 办公室">Office</a>
+    </nav>
+    <div class="top-actions">
+      <span id="connection" class="connection" data-status="connecting" role="status">连接中</span>
+      <button type="button" id="inbox-button" class="inbox-button" data-act="inbox" aria-haspopup="dialog">
+        待你处理 <span id="inbox-count">0</span>
+      </button>
+    </div>
+  </header>
+  <div id="connection-error" class="banner" role="alert" hidden></div>
+
+  <main class="workspace">
+    <section class="view chat-view" id="view-chat" aria-labelledby="chat-title">
+      <aside class="people" aria-labelledby="members-title">
+        <div class="people-head">
+          <h2 id="members-title">成员</h2>
+          <span id="member-count" class="muted"></span>
+        </div>
+        <div id="members" class="members"></div>
+      </aside>
+      <div class="chat-main">
+        <header class="view-head">
+          <h1 id="chat-title">聊天室</h1>
+          <button type="button" class="button primary" data-act="launch" aria-haspopup="dialog">＋ 发起</button>
+        </header>
+        <div id="chat-scroll" class="chat-scroll" tabindex="0" aria-label="聊天记录">
+          <div id="chat-timeline" class="chat-timeline" role="log" aria-label="聊天时间线"></div>
+        </div>
+        <form id="composer" class="composer" data-action-area>
+          <div id="recipients" class="recipient-row" role="group" aria-label="发给哪些成员"></div>
+          <div id="reply-bar" class="reply-bar" hidden></div>
+          <div class="input-row">
+            <textarea id="chat-text" data-keep="chat" rows="2" aria-label="消息" placeholder="写消息，或输入 @ 点名成员"></textarea>
+            <button type="submit" class="button primary">发送</button>
+          </div>
+          <p id="delivery-hint" class="muted"></p>
+          <p class="form-error" data-error role="alert"></p>
+        </form>
+      </div>
+    </section>
+
+    <section class="view scroll-view" id="view-meeting" aria-labelledby="meeting-title" hidden>
+      <div class="view-content">
+        <header class="view-head">
+          <h1 id="meeting-title">会议室</h1>
+          <button type="button" class="button primary" data-act="launch" aria-haspopup="dialog">＋ 发起</button>
+        </header>
+        <div id="meeting-content" class="stack"></div>
+      </div>
+    </section>
+
+    <section class="view scroll-view" id="view-office" aria-labelledby="office-title" hidden>
+      <div class="view-content">
+        <header class="view-head"><h1 id="office-title">办公室</h1></header>
+        <div id="office-tables" class="office-grid"></div>
+        <div id="office-stations" class="office-grid"></div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="inbox-dialog" class="drawer" aria-labelledby="inbox-title">
+    <header class="dialog-head">
+      <h2 id="inbox-title">待你处理</h2>
+      <button type="button" class="icon-button" data-act="close" aria-label="关闭待你处理" autofocus>×</button>
+    </header>
+    <div id="inbox-items" class="dialog-body stack"></div>
+  </dialog>
+
+  <dialog id="member-dialog" class="drawer member-drawer" aria-labelledby="member-title">
+    <header class="dialog-head">
+      <h2 id="member-title">成员详情</h2>
+      <button type="button" class="icon-button" data-act="close" aria-label="关闭成员详情" autofocus>×</button>
+    </header>
+    <div id="member-details" class="dialog-body stack"></div>
+  </dialog>
+
+  <dialog id="launch-dialog" class="launch-dialog" aria-labelledby="launch-title">
+    <header class="dialog-head">
+      <h2 id="launch-title">发起协作</h2>
+      <button type="button" class="icon-button" data-act="close" aria-label="关闭发起面板">×</button>
+    </header>
+    <div class="dialog-body stack" data-action-area>
+      <label class="field">
+        <span>目标或议题</span>
+        <textarea id="goal" data-keep="goal" rows="3" placeholder="输入希望团队完成的工作" autofocus></textarea>
+      </label>
+      <fieldset>
+        <legend>参会成员</legend>
+        <div id="participants" class="recipient-row"></div>
+      </fieldset>
+      <div class="button-row">
+        <button type="button" class="button primary" data-post="startMeeting">开会讨论</button>
+        <button type="button" class="button" data-post="startRun">直接开始（流水线）</button>
+        <button type="button" class="button danger" data-post="stopRun" id="launch-stop" hidden>停止当前任务</button>
+      </div>
+      <p class="form-error" data-error role="alert"></p>
+      <div id="launch-project" class="muted"></div>
+      <div class="fallback-links"><a href="/v1">会议室旧版</a><a href="/classic">经典面板</a></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="/panel/js/main.js"></script>
+</body>
+</html>

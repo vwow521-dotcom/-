@@ -1,7 +1,8 @@
 // Project context, progress, notes, questions and the panel's read model.
 import type { Doorbells } from "../doorbells/index.js";
+import { activityFor } from "./activity.js";
 import type { Chat } from "./chat.js";
-import type { Room } from "./room.js";
+import type { DeliveryNotice, Room } from "./room.js";
 import { err, type EngineContext, type Result } from "./context.js";
 import type { Leases } from "./leases.js";
 import type { Meetings } from "./meetings.js";
@@ -120,28 +121,70 @@ export class Workspace {
     const handoffs = run ? this.ctx.store.handoffs(run.id) : [];
     const tasks = run ? this.ctx.store.tasks(run.id) : [];
     const keyOf = (id: number | null) => (id ? tasks.find((t) => t.id === id)?.key ?? null : null);
+    const runOpen = run?.status === "active" || run?.status === "awaiting_approval";
     const waitingForTurn = new Set<string>();
     const openMeeting = this.ctx.store.openMeeting();
-    const spokenNow = openMeeting ? this.ctx.store.meetingTurns(openMeeting.id).filter((t) => t.round === openMeeting.round).map((t) => t.agent) : [];
+    const meeting = openMeeting ?? this.ctx.store.recentMeetings(1)[0];
+    const turns = meeting ? this.ctx.store.meetingTurns(meeting.id) : [];
+    const expected = meeting ? this.meetings.expectedSpeakers(meeting) : [];
+    const spokenNow = turns.filter((t) => t.round === meeting?.round).map((t) => t.agent);
+    const roundMail = openMeeting?.status === "collecting"
+      ? this.ctx.store.mailWithPrefix(`meeting-${openMeeting.id}-${openMeeting.round}-`).filter((m) => m.kind === "meeting") : [];
+    const deliveries = new Map<string, DeliveryNotice>();
     const agents = this.presence.agentIds().map((id) => {
       const p = this.presence.get(id)!;
+      const status = this.presence.status(id);
+      const lastSeenAt = p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0)).toISOString() : null;
+      const active = runOpen ? lives.filter((a) => a.agent === id) : [];
+      const next = active.find((a) => a.status === "ready" || a.status === "in_progress");
+      const owesTurn = openMeeting?.status === "collecting" && expected.includes(id) && !spokenNow.includes(id);
       const pending = this.ctx.store.mailByStatus(id, [...LIVE_MAIL]);
       const waiting = this.postman.isBusy(id) ? pending.filter((m) => m.status === "rung") : [];
       for (const m of waiting) waitingForTurn.add(m.id);
       const unacked = this.ctx.store.mailByStatus(id, ["fetched"]).filter((m) => m.ack_required);
+      const stuck = pending.filter((m) => m.status === "stuck");
+      const unanswered = pending.filter((m) => !waitingForTurn.has(m.id) && this.postman.isUnanswered(m.id));
+      let delivery: DeliveryNotice | undefined;
+      if (stuck.length) {
+        delivery = {
+          reason: "stuck", agent: id, at: stuck[0].created_at, title: `${id} 有 ${stuck.length} 封信送不到`,
+          message: `${id} 没有响应门铃，有 ${stuck.length} 封信送不到。请在 ${id} 里说「继续」。`,
+        };
+      } else if (unanswered.length) {
+        delivery = {
+          reason: "unanswered", agent: id, at: unanswered[0].created_at, title: `${id} 叫不醒，有 ${unanswered.length} 封信没取`,
+          message: `${id} 叫不醒，有 ${unanswered.length} 封信没取（对话可能已关闭或断开）。请打开它的对话说一句「继续」。`,
+        };
+      } else if (next && status === "never-joined") {
+        delivery = {
+          reason: status, agent: id, at: next.assigned_at, title: `${id} 有任务，等待加入`,
+          message: `轮到 ${id}，但它还没有加入协作桥。请在 ${id} 里粘贴启动提示词。`,
+        };
+      } else if (next && status === "offline" && !this.doorbells.sessionless(id)) {
+        delivery = {
+          reason: status, agent: id, at: next.assigned_at, title: `${id} 有任务，当前离线`,
+          message: `轮到 ${id}，但它不在线。请在 ${id} 里说「继续」。`,
+        };
+      }
+      if (delivery) deliveries.set(id, delivery);
       return {
         id,
         roles: this.presence.rolesOf(id),
         // What it is on right now: live stages of the open run, and a meeting turn it still owes.
         doing: [
-          ...(run && (run.status === "active" || run.status === "awaiting_approval")
-            ? this.ctx.store.agentAttempts(run.id, id, ["in_progress", "ready", "awaiting_approval"]).map((a) => ({ task: tasks.length > 1 ? keyOf(a.task_id) : null, stage: a.stage_id, status: a.status }))
-            : []),
-          ...(openMeeting?.status === "collecting" && this.meetings.expectedSpeakers(openMeeting).includes(id) && !spokenNow.includes(id)
+          ...active.map((a) => ({ task: tasks.length > 1 ? keyOf(a.task_id) : null, stage: a.stage_id, status: a.status })),
+          ...(owesTurn
             ? [{ task: null, stage: `会议第 ${openMeeting.round} 轮`, status: "meeting" }]
             : []),
         ],
-        status: this.presence.status(id),
+        status,
+        activity: activityFor({
+          id, status, lastSeen: p.lastSeenAt ? new Date(p.lastSeenAt).toISOString() : null,
+          attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
+          meeting: owesTurn ? {
+            meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),
+          } : undefined,
+        }),
         doorbell: this.presence.doorbellKind(id),
         doorbellLabel: this.doorbells.primary(id).label,
         doorbellChain: this.doorbells.chain(id),
@@ -157,33 +200,31 @@ export class Workspace {
             }
           : null,
         pendingMail: pending.length,
-        stuckMail: pending.filter((m) => m.status === "stuck").length,
+        stuckMail: stuck.length,
         waitingForTurn: waiting.length,
-        unansweredMail: pending.filter((m) => !waitingForTurn.has(m.id) && this.postman.isUnanswered(m.id)).length,
+        unansweredMail: unanswered.length,
         unackedMail: unacked.length,
         waitCalls: p.waitCalls,
-        lastSeenAt: p.lastSeenAt ? new Date(Math.max(p.lastSeenAt, p.lastReturnAt ?? 0)).toISOString() : null,
+        lastSeenAt,
         lastRingAt: p.lastRingAt ? new Date(p.lastRingAt).toISOString() : null,
       };
     });
+    // Keep the legacy banner's priorities while exposing all delivery issues in the inbox.
     let attention: { kind: "fallback" | "stale"; agent: string; message: string } | null = null;
-    const stuck = agents.find((a) => a.stuckMail > 0);
-    const unanswered = agents.find((a) => a.unansweredMail > 0);
-    if (stuck) attention = { kind: "fallback", agent: stuck.id, message: `${stuck.id} 没有响应门铃，有 ${stuck.stuckMail} 封信送不到。请在 ${stuck.id} 里说「继续」。` };
-    else if (unanswered)
-      attention = { kind: "fallback", agent: unanswered.id, message: `${unanswered.id} 叫不醒，有 ${unanswered.unansweredMail} 封信没取（对话可能已关闭或断开）。请打开它的对话说一句「继续」。` };
-    else if (run && (run.status === "active" || run.status === "awaiting_approval"))
+    const notices = [...deliveries.values()];
+    const mailNotice = notices.find((d) => d.reason === "stuck") ?? notices.find((d) => d.reason === "unanswered");
+    if (mailNotice) attention = { kind: "fallback", agent: mailNotice.agent, message: mailNotice.message };
+    else if (runOpen)
       for (const l of lives) {
         if (l.status !== "ready" && l.status !== "in_progress") continue;
-        const st = this.presence.status(l.agent);
-        if (st === "never-joined")
-          attention = { kind: "fallback", agent: l.agent, message: `轮到 ${l.agent}，但它还没有加入协作桥。请在 ${l.agent} 里粘贴启动提示词。` };
-        else if (st === "offline" && !this.doorbells.sessionless(l.agent))
-          attention = { kind: "fallback", agent: l.agent, message: `轮到 ${l.agent}，但它不在线。请在 ${l.agent} 里说「继续」。` };
-        else if (st === "stale") attention = { kind: "stale", agent: l.agent, message: `${l.agent} 一段时间没有响应，可能是网络波动，正在等它恢复。` };
+        const delivery = deliveries.get(l.agent);
+        if (delivery) attention = { kind: "fallback", agent: l.agent, message: delivery.message };
+        else if (agents.find((a) => a.id === l.agent)?.status === "stale")
+          attention = { kind: "stale", agent: l.agent, message: `${l.agent} 一段时间没有响应，可能是网络波动，正在等它恢复。` };
         if (attention) break;
       }
-    const meeting = this.ctx.store.openMeeting() ?? this.ctx.store.recentMeetings(1)[0];
+    const questions = this.ctx.store.openQuestions();
+    const timeline = this.room.timeline(questions, notices, run?.id, meeting?.id);
     const now = Date.now();
     return {
       project: this.ctx.cfg.projectDir,
@@ -207,20 +248,21 @@ export class Workspace {
       meeting: meeting
         ? {
             ...meeting,
-            expected: this.meetings.expectedSpeakers(meeting),
-            turns: this.ctx.store.meetingTurns(meeting.id),
+            expected,
+            turns,
           }
         : null,
       handoffs,
       agents,
       attention,
-      questions: this.ctx.store.openQuestions(),
+      questions,
       mail: this.ctx.store.recentMail(25).map((m) => ({
         id: m.id, from: m.from_agent, to: m.to_agent, kind: m.kind, subject: m.subject, status: m.status,
         ring_count: m.ring_count, created_at: m.created_at, overdue: !!m.overdue_flagged, waitingForTurn: waitingForTurn.has(m.id),
       })),
       chat: this.chat.recent(50, (a) => this.postman.isBusy(a)),
-      timeline: this.room.timeline(),
+      timeline,
+      inbox: this.room.inbox(timeline),
       endpoints: this.ctx.store.endpoints(),
       notes: this.ctx.store.notes().slice(-20).reverse(),
       events: this.ctx.store.recentEvents(40),

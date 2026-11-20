@@ -93,6 +93,11 @@ const api = async (p: string, body?: unknown) => {
   return { status: r.status, json: (await r.json().catch(() => null)) as any };
 };
 const state = async () => (await api("/api/state")).json;
+const activity = (s: any, id: string) => s.agents.find((a: any) => a.id === id)?.activity;
+const inboxItem = (s: any, kind: string, agent?: string) =>
+  s.inbox.find((item: any) => item.kind === kind && (!agent || item.agent === agent));
+const inboxContext = (s: any, item: any) => item && s.timeline.find((it: any) => it.type === item.ref.type &&
+  (it.type === "round" ? it.meeting_id === item.ref.meeting_id && it.round === item.ref.round : it.id === item.ref.id));
 let failed = false;
 function check(cond: unknown, msg: string) {
   console.log(cond ? "ok  " : "FAIL", msg);
@@ -130,6 +135,8 @@ try {
     "join tells delayed-loading clients to load all five tools before fetching mail",
   );
   check(!(await call(codex, "join", { agent_id: "codex" })).error, "codex joined");
+  const notJoined = activity(await state(), "pbot");
+  check(notJoined?.state === "never-joined" && notJoined.evidence && notJoined.since === null, "Office reports never-joined with evidence");
   check((await call(imposter, "join", { agent_id: "claude" })).error, "duplicate identity rejected");
   check((await call(claude, "fetch_inbox", { agent_id: "claude" })).mails.length === 0, "empty inbox");
   check((await call(claude, "wait_for_mail", { agent_id: "claude" })).status === "keep_waiting", "idle wait_for_mail → keep_waiting");
@@ -146,6 +153,11 @@ try {
   let s = await state();
   check(s.run.status === "awaiting_approval", "run waits at plan gate");
   check(s.timeline.some((x: any) => x.type === "handoff" && x.gate?.attempt_id === s.live.id && x.gate.reject_to === "plan"), "the gated handoff carries its approval card in the timeline");
+  const gateItem = inboxItem(s, "handoff_gate");
+  const gateCard = inboxContext(s, gateItem);
+  check(gateCard?.gate?.attempt_id === s.live.id && gateItem.id === "gate-" + s.live.id && gateItem.urgency === "high" &&
+    gateItem.target.view === "meeting" && gateItem.target.anchor === "handoff-" + gateCard.id, "inbox gate points to its full handoff card");
+  check(activity(s, "claude")?.state === "awaiting_you" && activity(s, "claude")?.since === gateCard?.at, "Office uses the submitted handoff as evidence of a gate");
   check(s.mail.find((m: any) => m.kind === "task" && m.to === "claude")?.status === "acked", "task mail auto-acked by submit_handoff");
 
   const codexWait = call(codex, "wait_for_mail", { agent_id: "codex" });
@@ -160,10 +172,19 @@ try {
   check(asked.status === "submitted", "ask_human returns immediately");
   s = await state();
   check(s.questions.length === 1, "question visible on panel");
+  const questionItem = inboxItem(s, "question");
+  const questionCard = inboxContext(s, questionItem);
+  check(questionCard?.id === s.questions[0].id && questionItem.target.view === "chat" &&
+    questionItem.target.anchor === "question-" + questionCard.id && !inboxItem(s, "handoff_gate"),
+    "answered gate disappears and the pending question links to its chat card");
+  const coding = activity(s, "codex");
+  check(coding?.state === "working" && coding.evidence && coding.since === s.live.started_at &&
+    coding.link?.anchor === "task-" + s.live.task_id, "Office derives working from the fetched implementation attempt");
   const ansWait = call(codex, "wait_for_mail", { agent_id: "codex" });
   await api(`/api/questions/${s.questions[0].id}/answer`, { answer: "是" });
   const ans = await ansWait;
   check(ans.mails?.some((m: any) => m.kind === "answer" && m.body.includes("是")), "answer arrives as mail");
+  check(!inboxItem(await state(), "question"), "the answered question disappears from the inbox");
 
   // Chat: the per-agent message box and the chat room are chat mail (no ack); the mail status is the receipt.
   const boxed = await api("/api/mail", { to: "codex", text: "顺便加个注释" });
@@ -207,6 +228,8 @@ try {
   let cm = await call(claude, "fetch_inbox", { agent_id: "claude" });
   t = task(cm);
   check(t?.stage.id === "review" && cm.mails.some((m: any) => m.id === "dup-1"), "claude gets review task and codex's note");
+  const reviewing = activity(await state(), "claude");
+  check(reviewing?.state === "reviewing" && reviewing.evidence, "Office recognizes a fetched review stage");
   const ctx = await call(claude, "get_context", { agent_id: "claude", last_n: 1 });
   check(
     ctx.handoffs_total === 2 && ctx.recent_handoffs.length === 1 && ctx.older_handoffs.length === 1 && ctx.notes.some((n: any) => n.text === "用 node 写"),
@@ -237,9 +260,22 @@ try {
   const commits = sh("log", "--oneline").split("\n").filter((l) => l.includes("[bridge]"));
   check(commits.length === 5 && commits.some((c) => c.includes("审查通过")), `5 bridge commits incl. review conclusions (got ${commits.length})`);
   check(!sh("status", "--porcelain").includes(".bridge"), ".bridge/ is not tracked or dirty in git");
-  const roomHtml = await (await fetch(BASE + "/")).text();
-  check(roomHtml.includes("/panel/room.js") && (await fetch(BASE + "/panel/room.js")).ok && (await fetch(BASE + "/panel/room.css")).ok, "meeting-room panel and its assets served");
+  const [panel, mainAsset, cssAsset, oldPanel, oldScript, oldStyle] = await Promise.all(
+    ["/", "/panel/js/main.js", "/panel/app.css", "/v1", "/panel/v1/room.js", "/panel/v1/room.css"].map((p) => fetch(BASE + p)),
+  );
+  check(panel.ok && (await panel.text()).includes('type="module" src="/panel/js/main.js"') &&
+    mainAsset.ok && /javascript/i.test(mainAsset.headers.get("content-type") || "") && cssAsset.ok,
+    "three-view panel serves its ES module with JavaScript MIME type");
+  check(oldPanel.ok && (await oldPanel.text()).includes("/panel/v1/room.js") && oldScript.ok && oldStyle.ok, "meeting-room fallback still served at /v1");
   check((await (await fetch(BASE + "/classic")).text()).includes("AI Bridge"), "classic panel still served at /classic");
+  const model = await import(new URL("../panel/js/model.js", import.meta.url).href);
+  check(JSON.stringify(model.recipients(["claude", "codex"], ["codex"], null, "@claude你好")) === '["codex","claude"]' &&
+    model.recipients(["claude", "codex"], [], null, "@所有人开始").length === 2 &&
+    model.recipients(["claude", "claude-review"], [], null, "@CLAUDE-REVIEW你好")[0] === "claude-review" &&
+    model.recipients(["cl", "claude"], [], null, "@claudex").length === 0,
+    "panel composer resolves Chinese suffixes, aliases and longest known mentions like the daemon");
+  check(model.deliveryHint([{ id: "claude", status: "working", doing: [{ status: "in_progress" }] }], [], null, "@claude你好").includes("消息排队到这一轮结束") &&
+    model.receiptLabel({ status: "rung", waitingForTurn: true })[0] === "排队中，等它这一轮结束", "panel uses the busy delivery hint and receipt label");
 
   await api("/api/runs", { goal: "第二个任务" });
   t = task(await call(claude, "fetch_inbox", { agent_id: "claude" }));
@@ -288,11 +324,17 @@ try {
   const proposalB = "方案 B：按功能拆" + "，补充详细说明".repeat(40);
   await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: proposalA });
   check((await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "again" })).error, "second turn in the same round rejected");
-  check((await state()).meeting.status === "collecting", "meeting waits for codex");
+  s = await state();
+  const owing = activity(s, "codex");
+  check(s.meeting.status === "collecting", "meeting waits for codex");
+  check(owing?.state === "meeting" && owing.since && owing.evidence &&
+    owing.link?.anchor === "round-" + mid + "-1", "Office identifies the member owing a turn and links to the current round");
   mm = meetingOf(await call(codex, "fetch_inbox", { agent_id: "codex" }));
   await call(codex, "submit_meeting_turn", { agent_id: "codex", meeting_id: mid, content: proposalB, tasks: [{ id: "T1", title: "草案", owner: "codex" }] });
   s = await state();
   check(s.meeting.status === "review" && s.meeting.turns.length === 2, "all proposals in → waits for the human");
+  const stalledItem = inboxItem(s, "meeting_stalled");
+  check(inboxContext(s, stalledItem)?.status === "review" && stalledItem.target.anchor === "round-" + mid + "-1", "a completed round needs a human decision");
   await api(`/api/meetings/${mid}/next`, { action: "critique", note: "重点看能不能并行" });
   mm = meetingOf(await call(claude, "fetch_inbox", { agent_id: "claude" }));
   check(
@@ -328,7 +370,11 @@ try {
     { id: "T3", title: "合并", description: "写 c.txt", owner: "claude", depends_on: ["T1", "T2"], paths: ["c.txt"] },
   ];
   await call(claude, "submit_meeting_turn", { agent_id: "claude", meeting_id: mid, content: "最终方案：四个任务", decisions: [{ what: "按目录拆", why: "互不干扰" }], tasks: plan });
-  check((await state()).meeting.status === "awaiting_approval", "final plan waits for approval");
+  s = await state();
+  check(s.meeting.status === "awaiting_approval", "final plan waits for approval");
+  const finalItem = inboxItem(s, "meeting_final");
+  check(inboxContext(s, finalItem)?.kind === "final" && finalItem.target.view === "meeting" &&
+    finalItem.target.anchor === "round-" + mid + "-3" && !inboxItem(s, "meeting_stalled"), "inbox final plan targets the approval round");
   write("IMPORTANT.md", "用户的反馈\n");
   sh("add", "--", "IMPORTANT.md");
   write("开工前新增.txt", "用户保留的未暂存文件\n");
@@ -338,6 +384,9 @@ try {
   check(minutes.includes("方案 A") && minutes.includes("| T3 | 合并 |") && minutes.includes("按目录拆 —— 互不干扰"), "minutes hold proposals, decisions and the task table");
   check(sh("log", "-1", "--format=%s", "--", appr.json.doc_path).includes("会议纪要") && !sh("status", "--porcelain").includes("doc/"), "minutes committed on their own");
   s = await state();
+  check(!inboxItem(s, "meeting_final"), "the approved final plan disappears from the inbox");
+  const ready = activity(s, "codex");
+  check(ready?.state === "idle" && ready.evidence.includes("有任务待领取"), "an unfetched ready attempt does not count as working");
   const tk = (k: string) => s.tasks.find((x: any) => x.key === k);
   check(tk("T1").status === "active" && tk("T2").status === "active" && tk("T4").status === "active" && tk("T3").waiting === "等 T1、T2", "T1/T2/T4 start, T3 waits on its dependencies");
   check(s.leases.filter((l: any) => !l.released_at).length === 3 && s.leases.some((l: any) => l.glob === "b/**"), "task paths leased (b/ → b/**)");
@@ -385,7 +434,8 @@ try {
   check(busyMember.waitingForTurn === 1 && busyMember.unansweredMail === 0 && busyMember.stuckMail === 0 &&
     s.attention?.agent !== "codex" && busyRing?.waitingForTurn && busyRing.status === "rung" && busyRing.ring_count === 1,
     "busy ring stays queued through the sweep, with neither retries nor a wake alert");
-  check((await (await fetch(BASE + "/panel/room.js")).text()).includes("排队中，等它这一轮结束"), "panel includes the busy queue label");
+  check(!inboxItem(s, "delivery", "codex") && model.receiptLabel(s.chat.find((m: any) => m.text === "结束 T2 后再看").receipts[0])[0] === "排队中，等它这一轮结束",
+    "busy chat stays out of the human inbox and retains its queue receipt");
   {
     const tl = (await state()).timeline as any[];
     const rounds = tl.filter((x) => x.type === "round" && x.meeting_id === mid);
@@ -695,6 +745,13 @@ try {
   await sleep(17_000);
   s = await state();
   check(s.mail.find((m: any) => m.to === "hbot3")?.status === "stuck" && s.agents.find((a: any) => a.id === "hbot3").stuckMail === 1, "undeliverable mail → stuck + attention banner");
+  const deliveryItem = inboxItem(s, "delivery", "hbot3");
+  const deliveryCard = inboxContext(s, deliveryItem);
+  check(deliveryCard?.agent === "hbot3" && deliveryCard.message === s.attention?.message &&
+    deliveryItem.target.view === "office" && deliveryItem.target.anchor === "member-hbot3" &&
+    s.inbox.filter((it: any) => it.kind === "delivery" && it.agent === "hbot3").length === 1, "inbox delivery, timeline and legacy fallback share the same evidence");
+  const unreachable = activity(s, "hbot3");
+  check(unreachable?.state === "unreachable" && unreachable.evidence && unreachable.since === deliveryItem?.at, "a stuck mail takes precedence over presence in Office");
 
   // Bridge restart while Codex is parked: the hook rides it out and still delivers.
   const survivor = runHook({ session_id: "s-3", transcript_path: tx2 }, { BRIDGE_PARK_SECONDS: "60", BRIDGE_DOWN_GRACE_SECONDS: "30" });

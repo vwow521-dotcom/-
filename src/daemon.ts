@@ -97,9 +97,10 @@ engine.context.onChange = () => {
   }, 150);
 };
 
-// The meeting-room panel is static (panel/ next to src/ and dist/); the pre-0.6 panel stays at /classic.
+// Static panel assets live next to src/ and dist/. Both earlier panels remain available.
 const PANEL_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "panel");
-app.get("/", (_req, res) => res.sendFile(path.join(PANEL_DIR, "room.html")));
+app.get("/", (_req, res) => res.sendFile(path.join(PANEL_DIR, "index.html")));
+app.get("/v1", (_req, res) => res.sendFile(path.join(PANEL_DIR, "v1", "room.html")));
 app.use("/panel", express.static(PANEL_DIR, { index: false }));
 app.get("/classic", (_req, res) => {
   res.type("html").send(PANEL_HTML);
