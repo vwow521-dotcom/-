@@ -26,6 +26,10 @@ const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.met
 const LOG_DIR = path.join(os.tmpdir(), "ai-bridge");
 fs.mkdirSync(LOG_DIR, { recursive: true });
 const LOG = path.join(LOG_DIR, "proxy.log");
+// The last tool list the daemon gave us. Clients such as the Codex desktop app read the list once per
+// conversation and ignore tools/list_changed, so a proxy that starts while the daemon is down serves this
+// list instead of a lone bridge_offline; calls then fail with a clear "start the bridge" message until it is up.
+const TOOLS_FILE = path.join(LOG_DIR, `tools-${createHash("sha256").update(BASE).digest("hex").slice(0, 16)}.json`);
 const JOIN_FILE = SOCK && TOKEN ? path.join(LOG_DIR, `join-${createHash("sha256").update(SOCK).digest("hex")}.json`) : null;
 const log = (msg, data) => {
   try {
@@ -256,14 +260,46 @@ const OFFLINE_TOOL = {
   inputSchema: { type: "object", properties: {} },
 };
 
+function readTools() {
+  try {
+    const { base, tools } = JSON.parse(fs.readFileSync(TOOLS_FILE, "utf8"));
+    if (base === BASE && Array.isArray(tools) && tools.length && tools.every((t) => typeof t?.name === "string")) return tools;
+  } catch {}
+  return null;
+}
+
+function saveTools(tools) {
+  const text = JSON.stringify({ base: BASE, version: VERSION, tools });
+  try {
+    if (fs.readFileSync(TOOLS_FILE, "utf8") === text) return;
+  } catch {}
+  const tmp = `${TOOLS_FILE}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, TOOLS_FILE);
+  } catch (e) {
+    log("tool cache write failed", { code: e.code });
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+  }
+}
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   try {
-    return await upstream((c) => c.listTools());
+    const listed = await upstream((c) => c.listTools());
+    if (!listed.nextCursor) saveTools(listed.tools);
+    return listed;
   } catch (e) {
     log("listTools failed", { error: String(e?.message ?? e) });
     waitForDaemonThenAnnounce();
-    return { tools: [OFFLINE_TOOL] };
+    const cached = readTools();
+    if (cached) log("serving cached tool list", { tools: cached.length });
+    return { tools: cached ?? [OFFLINE_TOOL] };
   }
+});
+
+const offlineReply = (error) => ({
+  content: [{ type: "text", text: `协作桥没有运行或连不上（${BASE}）：${error?.message ?? error}。请让用户运行：ai-bridge start --project <项目目录>。桥启动后直接重试这次调用即可，不用重开对话。` }],
+  isError: true,
 });
 
 async function forwardPrompt(request) {
@@ -293,7 +329,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     args = { ...args, _recovery: { key: randomUUID(), replay: false } };
     if (SOCK && TOKEN) args._doorbell = "claude-socket";
   }
-  const result = await upstream((c) => c.callTool({ name, arguments: args }, undefined, { signal: extra.signal, timeout: 10 * 60_000 }));
+  let result;
+  try {
+    result = await upstream((c) => c.callTool({ name, arguments: args }, undefined, { signal: extra.signal, timeout: 10 * 60_000 }));
+  } catch (e) {
+    // The daemon answered with an MCP error (bad arguments, timeout, cancel): pass it through.
+    if (e instanceof McpError || closing || extra.signal.aborted) throw e;
+    log("callTool failed, daemon unreachable", { tool: name, error: String(e?.message ?? e) });
+    waitForDaemonThenAnnounce();
+    return offlineReply(e);
+  }
   if (name === "join" && !closing) {
     const joined = toolReply(result);
     if (!joined.error && joined.agent_id) {

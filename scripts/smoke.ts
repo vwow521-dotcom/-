@@ -12,7 +12,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -1353,6 +1353,49 @@ notify: { enabled: false }
     cursor = page.next_before;
   } while (cursor);
   check(JSON.stringify(paged) === JSON.stringify(reopenedFolders.map((f: any) => f.id)), "one-folder pages walk the whole list once across the tied timestamps");
+
+  console.log("— J: proxy started while the daemon is down");
+  // Codex reads a conversation's tool list once and ignores tools/list_changed, so a proxy that starts
+  // while the daemon is down must still list the real tools (from its last good listing).
+  const toolsFile = (dir: string, base: string) =>
+    path.join(dir, "ai-bridge", `tools-${createHash("sha256").update(base).digest("hex").slice(0, 16)}.json`);
+  const proxyIn = async (dir: string, base: string) => {
+    const c = new Client({ name: "smoke-offline", version: "0.0.1" });
+    await c.connect(new StdioClientTransport({
+      command: process.execPath, args: [path.join(ROOT, "bin/bridge-mcp.mjs")],
+      env: { ...(process.env as Record<string, string>), BRIDGE_URL: base, TMP: dir, TEMP: dir, TMPDIR: dir },
+    }));
+    return c;
+  };
+  const deadPort = await new Promise<number>((resolve) => {
+    const s = net.createServer().listen(0, "127.0.0.1", () => { const port = (s.address() as net.AddressInfo).port; s.close(() => resolve(port)); });
+  });
+  const deadBase = `http://127.0.0.1:${deadPort}`;
+  const onlineDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-tools-"));
+  const online = await proxyIn(onlineDir, BASE);
+  const liveTools = (await online.listTools()).tools.map((t) => t.name);
+  await online.close();
+  const cache = JSON.parse(fs.readFileSync(toolsFile(onlineDir, BASE), "utf8"));
+  check(liveTools.includes("join") && JSON.stringify(cache.tools.map((t: any) => t.name)) === JSON.stringify(liveTools),
+    "a successful listing is cached per bridge address");
+
+  const coldDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-tools-"));
+  const cold = await proxyIn(coldDir, deadBase);
+  check(JSON.stringify((await cold.listTools()).tools.map((t) => t.name)) === JSON.stringify(["bridge_offline"]),
+    "with no cache and no daemon the proxy lists only bridge_offline");
+  await cold.close();
+
+  const warmDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-tools-"));
+  fs.mkdirSync(path.join(warmDir, "ai-bridge"), { recursive: true });
+  fs.writeFileSync(toolsFile(warmDir, deadBase), JSON.stringify({ ...cache, base: deadBase }));
+  const warm = await proxyIn(warmDir, deadBase);
+  const warmTools = (await warm.listTools()).tools.map((t) => t.name);
+  check(JSON.stringify(warmTools) === JSON.stringify(liveTools) && !warmTools.includes("bridge_offline"),
+    "a proxy started while the daemon is down lists the cached tools, not bridge_offline");
+  const offlineJoin: any = await warm.callTool({ name: "join", arguments: { agent_id: "codex" } }, undefined, { timeout: 30_000 });
+  check(offlineJoin.isError === true && /ai-bridge start/.test(offlineJoin.content?.[0]?.text ?? ""),
+    "a call while the daemon is down returns a tool error that says how to start the bridge");
+  await warm.close();
 } catch (e) {
   console.error(e);
   failed = true;
