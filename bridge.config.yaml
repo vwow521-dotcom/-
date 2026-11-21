@@ -3,6 +3,9 @@
 agents:
   claude: { product: claude-code, doorbell: auto }
   codex:  { product: codex, doorbell: auto }
+  # M3 之前没有门铃，只能轮询：join 时写明 agent_id，然后用 wait_for_mail 等信。
+  antigravity: { product: antigravity, doorbell: poll }
+  deepseek:    { product: deepseek-harness, doorbell: poll }
 pipeline:
   - id: implement
     role: 编码
