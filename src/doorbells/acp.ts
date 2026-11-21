@@ -10,7 +10,8 @@ const version: string = JSON.parse(fs.readFileSync(new URL("../../package.json",
 const proxy = fileURLToPath(new URL("../../bin/bridge-mcp.mjs", import.meta.url));
 const retrySeconds = Number(process.env.BRIDGE_ACP_RETRY_SECONDS ?? 30);
 const retryMs = Number.isFinite(retrySeconds) && retrySeconds > 0 ? Math.min(retrySeconds, 30) * 1000 : 30_000;
-const cancelGraceMs = 3000;
+const cancelGraceSeconds = Number(process.env.BRIDGE_ACP_CANCEL_GRACE_SECONDS ?? 30);
+const cancelGraceMs = cancelGraceSeconds > 0 && cancelGraceSeconds <= 2_147_483 ? cancelGraceSeconds * 1000 : 30_000;
 
 export interface AcpBindings {
   bridgeUrl: string;
@@ -26,7 +27,9 @@ interface AcpTurn {
   fetched: Set<string>;
   toolTitles: Map<string, string>;
   started: number;
-  cancelTimer?: NodeJS.Timeout;
+  done: Promise<void>;
+  finish(): void;
+  cancel?: { started: number; timer: NodeJS.Timeout };
 }
 
 interface AcpSession {
@@ -41,6 +44,7 @@ class AcpHost {
   private session?: AcpSession;
   private starting?: Promise<void>;
   private closing?: Promise<void>;
+  private closingTurn?: AcpTurn;
   private turn?: AcpTurn;
   private stopped?: string;
   private reason?: string;
@@ -192,8 +196,11 @@ class AcpHost {
   }
 
   private prompt(rpc: AcpRpc, session: AcpSession, wake: Wake, ids: string[]) {
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
     const turn = this.turn = {
       wake, ids: new Set(ids), fetched: new Set<string>(), toolTitles: new Map<string, string>(), started: Date.now(),
+      done, finish,
     };
     // Use the MCP mailbox for the work itself. Include join on a new connection even if ACP resumed a conversation.
     const mcp = `本会话的协作桥工具在 MCP 服务器 ${session.mcpName} 下。取信、交接等协作桥操作均使用这个服务器。`;
@@ -221,29 +228,61 @@ class AcpHost {
     for (const id of ids) this.turn?.fetched.add(id);
   }
 
+  cancelling() {
+    return !!(this.turn ?? this.closingTurn)?.cancel;
+  }
+
   voided(ids: string[]) {
-    const turn = this.turn;
-    if (turn && ids.some((id) => turn.ids.has(id) || turn.fetched.has(id))) this.cancel("信件已作废");
+    const turn = this.turn ?? this.closingTurn;
+    if (!turn || !ids.some((id) => turn.ids.has(id) || turn.fetched.has(id))) return;
+    if (turn === this.turn) this.cancel("信件已作废");
+    return turn.done;
   }
 
   private cancel(reason: string) {
     const turn = this.turn;
-    if (!turn || turn.cancelTimer || !this.session || !this.rpc?.alive) return;
+    if (!turn || turn.cancel || !this.session || !this.rpc?.alive) return;
+    turn.cancel = {
+      started: performance.now(),
+      timer: setTimeout(() => {
+        if (this.turn === turn && !this.stopped) void this.cancelTimedOut(turn);
+      }, cancelGraceMs).unref(),
+    };
     this.rpc.notify("session/cancel", { sessionId: this.session.id });
-    this.emit("acp_cancel", reason, { mails: [...new Set([...turn.ids, ...turn.fetched])] });
-    turn.cancelTimer = setTimeout(() => {
-      if (this.turn === turn && !this.stopped) this.fail(new Error("ACP 代理没有确认取消回合"));
-    }, cancelGraceMs).unref();
+    this.activity = { evidence: "正在取消后台回合", since: new Date().toISOString() };
+    this.emit("acp_cancel", reason, { mails: [...new Set([...turn.ids, ...turn.fetched])], graceMs: cancelGraceMs });
+  }
+
+  private finishTurn(turn: AcpTurn, outcome: string) {
+    if (turn.cancel) {
+      clearTimeout(turn.cancel.timer);
+      const elapsedMs = Math.round(performance.now() - turn.cancel.started);
+      this.emit("acp_cancel_end", `取消回合已收尾（${elapsedMs} 毫秒）`, { elapsedMs, outcome });
+    }
+    turn.finish();
+  }
+
+  private async cancelTimedOut(turn: AcpTurn) {
+    this.emit("acp_cancel_timeout", "ACP 取消回合超时，正在结束进程树", {
+      graceMs: cancelGraceMs, failures: this.failures,
+    });
+    const rpc = this.detach();
+    this.requeueFetched(turn);
+    await this.close(rpc, "timeout");
+    const unread = this.ctx.store.mailByStatus(this.agent, ["queued", "rung"]);
+    if (!this.stopped && unread.length) this.bindings.retry(this.agent, unread.map((mail) => mail.id));
   }
 
   private endTurn(turn: AcpTurn, stopReason: string) {
-    clearTimeout(turn.cancelTimer);
     this.turn = undefined;
     this.activity = undefined;
-    this.failures = 0;
+    if (turn.cancel) {
+      this.requeueFetched(turn);
+      this.followed.clear();
+    } else if (stopReason !== "cancelled") this.failures = 0;
     this.emit("acp_turn_end", `ACP 回合结束（${shortText(stopReason, 60)}）`,
       { stopReason: shortText(stopReason, 60), elapsedMs: Date.now() - turn.started });
-    if (turn.cancelTimer) this.requeueFetched(turn);
+    this.finishTurn(turn, stopReason);
     if (!this.available()) return;
     const unread = this.ctx.store.mailByStatus(this.agent, ["queued", "rung"]);
     const ids = unread.filter((mail) => !this.followed.has(mail.id)).map((mail) => mail.id);
@@ -276,7 +315,7 @@ class AcpHost {
     this.emit("acp_exit", this.stopped ?? `后台异常：${this.reason}，稍后重试`, { code, failures: retries, retryAt: this.retryAt, error: this.reason });
     this.requeueFetched(turn);
     if (turn) this.bindings.failed(this.agent, turn.wake.mailIds, this.reason);
-    void this.close(rpc, false);
+    void this.close(rpc, "process_exit");
     if (this.retryAt) this.retryTimer = setTimeout(async () => {
       await this.closing;
       if (this.stopped) return;
@@ -290,20 +329,25 @@ class AcpHost {
     const rpc = this.rpc;
     this.rpc = undefined;
     this.session = undefined;
-    clearTimeout(this.turn?.cancelTimer);
+    if (this.turn) {
+      clearTimeout(this.turn.cancel?.timer);
+      this.closingTurn = this.turn;
+    }
     this.turn = undefined;
     this.activity = undefined;
     this.followed.clear();
     return rpc;
   }
 
-  private close(rpc: AcpRpc | undefined, graceful: boolean, session?: AcpSession) {
+  private close(rpc: AcpRpc | undefined, outcome: "stopped" | "timeout" | "process_exit", session?: AcpSession) {
     if (this.closing) return this.closing;
     const close = async () => {
-      if (graceful && session?.close && rpc?.alive) {
+      if (session?.close && rpc?.alive) {
         await rpc.request("session/close", { sessionId: session.id }, 2000).catch(() => {});
       }
       await Promise.all([rpc?.terminate(), this.bindings.closeSessions(this.agent)]);
+      if (this.closingTurn) this.finishTurn(this.closingTurn, outcome);
+      this.closingTurn = undefined;
     };
     this.closing = close().finally(() => { this.closing = undefined; this.ctx.changed(); });
     return this.closing;
@@ -318,7 +362,7 @@ class AcpHost {
     const rpc = this.detach();
     this.requeueFetched(turn);
     this.ctx.changed();
-    await this.close(rpc, true, session);
+    await this.close(rpc, "stopped", session);
     await starting?.catch(() => {});
     if (rpc) this.emit("acp_exit", reason, { pid: rpc.pid });
   }
@@ -342,13 +386,13 @@ class AcpHost {
       const content = update.content as { type?: string; text?: string } | undefined;
       if (content?.type !== "text" || typeof content.text !== "string") return;
       this.appendOutput(content.text);
-      this.activity = { evidence: "正在回复", since };
+      if (!turn.cancel) this.activity = { evidence: "正在回复", since };
     } else if (update?.sessionUpdate === "tool_call" || update?.sessionUpdate === "tool_call_update") {
       const id = shortText(update.toolCallId, 120);
       const title = shortText(update.title, 160) || turn.toolTitles.get(id) || id || "工具";
       const status = shortText(update.status, 40);
       if (id) turn.toolTitles.set(id, title);
-      this.activity = { evidence: "正在调用 " + title, since };
+      if (!turn.cancel) this.activity = { evidence: "正在调用 " + title, since };
       if (update.sessionUpdate === "tool_call" || status) this.ctx.log("acp_tool", { agent: this.agent, title, status });
     } else return;
     this.ctx.changed();
@@ -365,7 +409,7 @@ class AcpHost {
     const turn = this.turn;
     const toolCall = params.toolCall as { title?: string; toolCallId?: string } | undefined;
     const options = (Array.isArray(params.options) ? params.options : []) as { kind?: string; optionId?: string }[];
-    const valid = this.rpc === rpc && params.sessionId === this.session?.id && !this.stopped && turn && !turn.cancelTimer;
+    const valid = this.rpc === rpc && params.sessionId === this.session?.id && !this.stopped && turn && !turn.cancel;
     const optionFor = (kind: string) => options.find((o) => o?.kind === kind && typeof o.optionId === "string");
     const option = valid && (this.config.permissions === "allow"
       ? optionFor("allow_once") ?? optionFor("allow_always") : optionFor("reject_once"));
@@ -402,7 +446,14 @@ export class AcpDoorbell implements Doorbell {
   connecting(agent: string) { return this.hosts.get(agent)?.connecting() ?? false; }
   snapshot(agent: string) { return this.hosts.get(agent)?.snapshot() ?? null; }
   fetched(agent: string, ids: string[]) { this.hosts.get(agent)?.fetched(ids); }
-  voided(ids: string[]) { for (const host of this.hosts.values()) host.voided(ids); }
+  cancelling(agent: string) { return this.hosts.get(agent)?.cancelling() ?? false; }
+  voided(ids: string[]) {
+    const turns = [...this.hosts.values()].flatMap((host) => {
+      const done = host.voided(ids);
+      return done ? [done] : [];
+    });
+    return turns.length <= 1 ? turns[0] : Promise.all(turns).then(() => {});
+  }
   stop(agent: string) { return this.hosts.get(agent)?.stop("已手动停止"); }
   restart(agent: string) { return this.hosts.get(agent)?.restart(); }
   shutdown() { return Promise.all([...this.hosts.values()].map((host) => host.stop("协作桥退出"))); }

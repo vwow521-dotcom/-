@@ -146,7 +146,10 @@ export class Doorbells {
       stats.consecutiveFailures++;
       if (outcome === "failed") stats.ringFailuresInStreak++;
       else stats.unconfirmedInStreak++;
-      if (bell.verify && (cooldown || stats.consecutiveFailures >= this.cfg.doorbells.max_unconfirmed_rings))
+      const failuresForCooldown = bell.kind === "acp" ? stats.unconfirmedInStreak : stats.consecutiveFailures;
+      // The ACP host owns retry timing for a failed delivery. A prior wake check must not prolong it.
+      if (bell.kind === "acp" && outcome === "failed") stats.degradedUntil = null;
+      else if (bell.verify && (cooldown || failuresForCooldown >= this.cfg.doorbells.max_unconfirmed_rings))
         this.degrade(agent, bell, stats);
     }
     this.ctx.changed();

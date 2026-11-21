@@ -11,6 +11,7 @@ const inGlob = (g: string, f: string) => globMatch(normGlob(g), f);
 
 export class Scheduler {
   private readonly taskWaits = new Map<number, string>(); // task id → why a ready-to-start task hasn't started (lease conflict)
+  private readonly committing = new Map<number, Promise<unknown>>();
 
   constructor(
     private readonly ctx: EngineContext,
@@ -29,6 +30,14 @@ export class Scheduler {
   retryBlockedTasks() {
     const run = this.ctx.store.openRun();
     if (run && this.taskWaits.size) this.schedule(run.id);
+  }
+
+  resumeAfterCancellation() {
+    const run = this.ctx.store.openRun();
+    if (!run) return;
+    this.schedule(run.id);
+    const agents = this.ctx.store.liveAttempts(run.id).filter((a) => a.status === "ready").map((a) => a.agent);
+    for (const agent of new Set(agents)) this.deliver(agent);
   }
 
   private pipelineStages(): TaskStage[] {
@@ -165,6 +174,8 @@ export class Scheduler {
     if (this.ctx.store.agentAttempts(run.id, agent, ["in_progress"]).length) return;
     const ready = this.ctx.store.agentAttempts(run.id, agent, ["ready"]);
     if (!ready.length) return;
+    const task = this.ctx.store.task(ready[0].task_id)!;
+    if (this.leases.cancellationConflict(task)) return;
     const mailed = ready.some((a) => this.ctx.store.taskMailFor(a.id).some((m) => [...LIVE_MAIL, "fetched"].includes(m.status as any)));
     if (!mailed) this.sendTaskMail(run.id, ready[0]);
   }
@@ -184,20 +195,29 @@ export class Scheduler {
   stopRun(): Result {
     const run = this.ctx.store.openRun();
     if (!run) return err("当前没有进行中的任务。");
-    for (const a of this.ctx.store.attempts(run.id))
-      if (["ready", "in_progress", "awaiting_approval"].includes(a.status)) {
-        this.ctx.store.updateAttempt(a.id, { status: "cancelled", ended_at: new Date().toISOString() });
-        const mails = this.ctx.store.taskMailFor(a.id);
-        this.postman.voidMails(mails.filter((m) => [...LIVE_MAIL, "fetched"].some((s) => s === m.status)).map((m) => m.id));
-        this.postman.cancelAcpMail(mails.filter((m) => m.status === "acked").map((m) => m.id));
-      }
-    for (const t of this.ctx.store.tasks(run.id)) if (t.status === "pending" || t.status === "active") this.ctx.store.setTaskStatus(t.id, "cancelled");
-    this.ctx.store.releaseLeasesOfRun(run.id);
+    const tasks = new Map(this.ctx.store.tasks(run.id).map((task) => [task.id, task]));
+    for (const a of this.ctx.store.attempts(run.id)) {
+      const live = ["ready", "in_progress", "awaiting_approval"].includes(a.status);
+      if (live) this.ctx.store.updateAttempt(a.id, { status: "cancelled", ended_at: new Date().toISOString() });
+      const mails = this.ctx.store.taskMailFor(a.id);
+      const unread = live ? mails.filter((m) => [...LIVE_MAIL, "fetched"].some((s) => s === m.status)).map((m) => m.id) : [];
+      const acknowledged = mails.filter((m) => m.status === "acked").map((m) => m.id);
+      this.holdCancellation(a, tasks.get(a.task_id)!, this.postman.voidMails(unread, acknowledged));
+    }
+    for (const t of tasks.values()) if (t.status === "pending" || t.status === "active") this.ctx.store.setTaskStatus(t.id, "cancelled");
+    this.leases.releaseRun(run.id);
     this.taskWaits.clear();
     this.ctx.store.setRunStatus(run.id, "stopped");
     this.ctx.log("run_stop", { run: run.id });
     this.ctx.event(run.id, null, "run", `任务 #${run.id} 已停止`);
     return { ok: true };
+  }
+
+  private holdCancellation(a: Attempt, task: Task, done: Promise<void> | undefined) {
+    if (!done) return;
+    // An ACP turn can end even while its outstanding MCP handoff is still finishing a Git command.
+    const commit = this.committing.get(a.id);
+    this.leases.holdForCancellation(task, commit ? Promise.allSettled([done, commit]).then(() => {}) : done);
   }
 
   /** Start every task whose dependencies are done and whose paths are free; finish the run when all tasks are. */
@@ -210,9 +230,11 @@ export class Scheduler {
     for (const t of tasks) {
       if (t.status !== "pending") continue;
       if (!t.depends_on.every((k) => byKey.get(k)?.status === "done")) continue;
-      const conflicts = this.leases.leaseConflicts(t.paths, { agent: t.owner, taskId: t.id, exclusive: true });
-      if (conflicts.length) {
-        const why = `等文件租约：${conflicts.map((c) => `${c.lease_glob}（${c.held_by}${c.task ? "/" + c.task : ""}）`).join("、")}`;
+      const cancelling = this.leases.cancellationConflict(t);
+      const conflicts = cancelling ? [] : this.leases.leaseConflicts(t.paths, { agent: t.owner, taskId: t.id, exclusive: true });
+      if (cancelling || conflicts.length) {
+        const why = cancelling ? `等 ACP 回合取消：运行 #${cancelling.run_id} 的 ${cancelling.key}`
+          : `等文件租约：${conflicts.map((c) => `${c.lease_glob}（${c.held_by}${c.task ? "/" + c.task : ""}）`).join("、")}`;
         if (this.taskWaits.get(t.id) !== why) this.ctx.event(run_id, null, "lease", `${t.key} ${why}`);
         this.taskWaits.set(t.id, why);
         continue;
@@ -267,7 +289,7 @@ export class Scheduler {
   }
 
   /** Decide what the handoff commits and what to tell the human about scope. */
-  private async scopeAndCommit(run: Run, task: Task, stage: TaskStage, agent: string, data: HandoffData) {
+  private async scopeAndCommit(run: Run, task: Task, attempt: Attempt, stage: TaskStage, agent: string, data: HandoffData) {
     const changed = await changedFiles(this.ctx.cfg.projectDir);
     const declared = new Set(data.files_changed.map(norm));
     const tasks = this.ctx.store.tasks(run.id);
@@ -325,7 +347,7 @@ export class Scheduler {
 
     let commit_sha: string | null = null;
     let commit_error: string | null = null;
-    if (this.ctx.cfg.git.auto_commit) {
+    if (this.ctx.cfg.git.auto_commit && this.ctx.store.attempt(attempt.id)?.status === "in_progress") {
       const multi = tasks.length > 1;
       const verdictText = data.verdict === "approve" ? "审查通过 — " : data.verdict === "reject" ? "审查打回 — " : "";
       const subject = `[bridge] ${multi ? task.key + " " : ""}${stage.id} by ${agent}: ${verdictText}${data.summary}`.slice(0, 120);
@@ -361,7 +383,11 @@ export class Scheduler {
       );
     const task = this.ctx.store.task(a.task_id)!;
     const stage = this.stageOf(task, a.stage_id);
-    const { commit_sha, commit_error, scope_notes } = await this.scopeAndCommit(run, task, stage, agent, data);
+    if (this.committing.has(a.id)) return err("这个阶段的交接正在提交。");
+    const commit = this.scopeAndCommit(run, task, a, stage, agent, data);
+    this.committing.set(a.id, commit);
+    const { commit_sha, commit_error, scope_notes } = await commit.finally(() => this.committing.delete(a.id));
+    if (this.ctx.store.attempt(a.id)?.status !== "in_progress") return err("这个阶段已停止或被替换，交接未推进流程。");
 
     const h = this.ctx.store.addHandoff({ run_id: run.id, attempt_id: a.id, stage_id: stage.id, agent, data, commit_sha, commit_error, scope_notes });
     const label = this.taskLabel(task);
@@ -419,7 +445,7 @@ export class Scheduler {
         trimmed ? { kind: "approval_note", from_stage: stage.id, user_requirements: [trimmed], blocking: [], observations: [] } : null,
       );
     } else {
-      this.postman.cancelAcpMail(this.ctx.store.taskMailFor(a.id).map((m) => m.id));
+      this.holdCancellation(a, task, this.postman.cancelAcpMail(this.ctx.store.taskMailFor(a.id).map((m) => m.id)));
       const target = this.stageOf(task, stage.on_reject ?? stage.id);
       const comments = h?.data.review_comments ?? [];
       const rejected = h?.data.verdict === "reject";

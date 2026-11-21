@@ -6,22 +6,79 @@ import type { Postman } from "./postman.js";
 import type { Presence } from "./presence.js";
 import type { Scheduler } from "./scheduler.js";
 
+interface CancellationHold {
+  task: Task;
+  paths: string[];
+  leaseIds: Set<number>;
+  turns: Set<Promise<void>>;
+}
+
 export class Leases {
+  private readonly cancellationHolds = new Map<number, CancellationHold>();
+
   constructor(
     private readonly ctx: EngineContext,
     private readonly presence: Presence,
     private readonly postman: Postman,
-    private readonly scheduler: Pick<Scheduler, "currentTask" | "schedule">,
-  ) {}
+    private readonly scheduler: Pick<Scheduler, "currentTask" | "schedule" | "resumeAfterCancellation">,
+  ) {
+    // The previous daemon's in-memory holds cannot release leases on a stopped run after a restart.
+    const stoppedRuns = new Set<number>();
+    for (const lease of ctx.store.openLeases()) {
+      if (lease.run_id !== null && ctx.store.run(lease.run_id)?.status === "stopped") stoppedRuns.add(lease.run_id);
+    }
+    for (const runId of stoppedRuns) ctx.store.releaseLeasesOfRun(runId);
+  }
+
+  holdForCancellation(task: Task, done: Promise<void>) {
+    let hold = this.cancellationHolds.get(task.id);
+    if (!hold) {
+      const active = this.activeLeases().filter((lease) => lease.task_id === task.id);
+      hold = {
+        task, paths: [...task.paths, ...active.map((lease) => lease.glob)],
+        leaseIds: new Set(active.map((lease) => lease.id)), turns: new Set(),
+      };
+      this.cancellationHolds.set(task.id, hold);
+    }
+    if (hold.turns.has(done)) return;
+    hold.turns.add(done);
+    const current = hold;
+    void done.then(() => {
+      current.turns.delete(done);
+      if (current.turns.size) return;
+      this.cancellationHolds.delete(task.id);
+      if (this.ctx.store.run(task.run_id)?.status === "stopped") this.ctx.store.releaseLeasesOfTask(task.id);
+      this.scheduler.resumeAfterCancellation();
+      this.ctx.onChange();
+    });
+  }
+
+  cancellationConflict(task: Task): Task | undefined {
+    for (const hold of this.cancellationHolds.values()) {
+      // A task without declared paths can write anywhere in the project.
+      if (hold.task.id === task.id || !hold.task.paths.length || !task.paths.length
+        || task.paths.some((path) => hold.paths.some((heldPath) => globsOverlap(path, heldPath)))) return hold.task;
+    }
+  }
+
+  releaseRun(runId: number) {
+    for (const lease of this.ctx.store.openLeases()) {
+      if (lease.run_id === runId && !this.heldForCancellation(lease)) this.ctx.store.releaseLease(lease.id);
+    }
+  }
+
+  private heldForCancellation(lease: Lease) {
+    return lease.task_id !== null && this.cancellationHolds.get(lease.task_id)?.leaseIds.has(lease.id);
+  }
 
   leaseTaskPaths(task: Task) {
     for (const g of task.paths) this.ctx.store.addLease({ run_id: task.run_id, task_id: task.id, agent: task.owner, glob: normGlob(g), exclusive: 1, reason: `任务 ${task.key}`, expires_at: null });
   }
 
-  /** Unreleased leases that still count: no expiry (task leases) or not yet expired. */
+  /** Unreleased leases that still count, including those retained while a task's ACP turn cancels. */
   activeLeases(): Lease[] {
     const now = Date.now();
-    return this.ctx.store.openLeases().filter((l) => !l.expires_at || Date.parse(l.expires_at) > now);
+    return this.ctx.store.openLeases().filter((l) => !l.expires_at || Date.parse(l.expires_at) > now || this.heldForCancellation(l));
   }
 
   /** Leases held by someone else that collide with `globs`. A lease collides when either side is exclusive. */
@@ -42,6 +99,7 @@ export class Leases {
   reservePaths(agent: string, sessionId: string | undefined, globs: string[], exclusive = true, ttlSeconds?: number, reason = ""): Result {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
+    if (this.postman.isCancellingAcp(agent, sessionId)) return err("后台回合正在取消，请在下一回合申请文件租约。");
     const clean = [...new Set(globs.map(normGlob).filter(Boolean))];
     if (!clean.length) return err("globs 不能为空。");
     const run = this.ctx.store.openRun();
@@ -95,7 +153,8 @@ export class Leases {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
     const want = globs?.length ? new Set(globs.map((g) => normGlob(g).toLowerCase())) : null;
-    const mine = this.ctx.store.openLeases().filter((l) => l.agent === agent && l.expires_at && (!want || want.has(l.glob.toLowerCase())));
+    const mine = this.ctx.store.openLeases().filter((l) => l.agent === agent && l.expires_at
+      && !this.heldForCancellation(l) && (!want || want.has(l.glob.toLowerCase())));
     for (const l of mine) this.ctx.store.releaseLease(l.id);
     this.ctx.log("lease_released", { agent, ids: mine.map((l) => l.id) });
     if (mine.length) this.ctx.event(null, agent, "lease", `${agent} 释放了 ${mine.map((l) => l.glob).join("、")}`);

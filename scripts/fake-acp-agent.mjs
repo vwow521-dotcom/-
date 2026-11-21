@@ -8,7 +8,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const agent = process.env.BRIDGE_AGENT_ID;
-const { FAKE_ACP_LOG: logFile, FAKE_ACP_PERMISSIONS, FAKE_ACP_TURN_MS, FAKE_ACP_CRASH_AT, FAKE_ACP_NO_HTTP } = process.env;
+const {
+  FAKE_ACP_LOG: logFile, FAKE_ACP_PERMISSIONS, FAKE_ACP_TURN_MS, FAKE_ACP_CRASH_AT,
+  FAKE_ACP_CRASH_LIMIT, FAKE_ACP_NO_HTTP, FAKE_ACP_CANCEL_DELAY_MS, FAKE_ACP_IGNORE_CANCEL,
+} = process.env;
 const log = (event, fields) => fs.appendFileSync(logFile, JSON.stringify({ event, pid: process.pid, agent, ...fields }) + "\n");
 const send = (message) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n");
 let client;
@@ -63,16 +66,20 @@ async function permission() {
   log("decision", await result);
 }
 
+function crash() {
+  const marker = logFile + ".crashed";
+  const crashes = fs.existsSync(marker) ? Number(fs.readFileSync(marker, "utf8")) : 0;
+  if (crashes >= Number(FAKE_ACP_CRASH_LIMIT ?? 1)) return;
+  fs.writeFileSync(marker, String(crashes + 1));
+  process.exit(47);
+}
+
 async function prompt() {
   if (turn) throw new Error("a second prompt overlapped the active turn");
   const current = turn = new AbortController();
   try {
     prompts++;
-    const marker = logFile + ".crashed";
-    if (prompts === Number(FAKE_ACP_CRASH_AT) && !fs.existsSync(marker)) {
-      fs.writeFileSync(marker, String(process.pid));
-      process.exit(47);
-    }
+    if (prompts === Number(FAKE_ACP_CRASH_AT)) crash();
     if (!joined) {
       const result = await call("join");
       log("joined", { doorbell: result.doorbell, agent_id: result.agent_id, protocol: result.protocol.at(-2) });
@@ -89,7 +96,16 @@ async function prompt() {
       current.signal.addEventListener("abort", () => { clearTimeout(timeout); resolve(); }, { once: true });
       if (current.signal.aborted) { clearTimeout(timeout); resolve(); }
     });
-    if (current.signal.aborted) return { stopReason: "cancelled" };
+    if (current.signal.aborted) {
+      if (FAKE_ACP_IGNORE_CANCEL === "1") {
+        // Output on the old turn should never extend a fixed cancellation deadline.
+        setInterval(() => update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "still running\n" } }), 300);
+        await new Promise(() => {});
+      }
+      await new Promise((resolve) => setTimeout(resolve, Number(FAKE_ACP_CANCEL_DELAY_MS || 0)));
+      log("cancel_finished", { sessionId });
+      return { stopReason: "cancelled" };
+    }
     for (const mail of mails.filter((m) => !m.void)) {
       if (mail.kind === "task") {
         const view = mail.task.stage.id === "review";
@@ -113,6 +129,7 @@ const methods = {
       claudeKeys: Object.keys(process.env).filter((key) => /^CLAUDE_CODE_/i.test(key)),
       doorbell: process.env.BRIDGE_DOORBELL, bridgeAgent: agent,
     });
+    if (FAKE_ACP_CRASH_AT === "initialize") crash();
     return { protocolVersion: 1, agentInfo: { name: "fake-acp", version: "1.0.0" },
       agentCapabilities: { loadSession: true, mcpCapabilities: { http: !FAKE_ACP_NO_HTTP }, sessionCapabilities: { resume: {}, close: {} } } };
   },

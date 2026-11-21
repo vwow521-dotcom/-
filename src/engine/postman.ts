@@ -149,7 +149,8 @@ export class Postman {
       mw();
     }
     const bell = this.doorbells.pick(agent, tried);
-    if (!bell) return;
+    // Leave new mail queued while the ACP turn is cancelling, so it does not spend its ring attempts.
+    if (!bell || (bell.kind === "acp" && this.doorbells.acp.cancelling(agent))) return;
     const ids = queued.map((m) => m.id);
     const text =
       `[协作桥] ${agent}，你有 ${queued.length} 封新信：` +
@@ -200,13 +201,17 @@ export class Postman {
     this.kick(agent);
   }
 
-  voidMails(ids: string[]) {
+  voidMails(ids: string[], acknowledged: string[] = []) {
     this.ctx.store.setMailStatus(ids, "void");
-    this.cancelAcpMail(ids);
+    return this.cancelAcpMail([...ids, ...acknowledged]);
   }
 
   cancelAcpMail(ids: string[]) {
-    if (ids.length) this.doorbells.acp.voided(ids);
+    return ids.length ? this.doorbells.acp.voided(ids) : undefined;
+  }
+
+  isCancellingAcp(agent: string, sessionId: string | undefined) {
+    return this.presence.acpAgent(sessionId) === agent && this.doorbells.acp.cancelling(agent);
   }
 
   private releaseDeferredWake(ids: string[]) {
@@ -248,6 +253,7 @@ export class Postman {
       if (measured) this.doorbells.recordResult(agent, bell, "confirmed");
       return;
     }
+    if (bell.kind === "acp" && this.doorbells.acp.cancelling(agent)) return;
     const unread = ids.filter((_, index) => statuses[index] === "rung" || statuses[index] === "queued");
     if (!unread.length) return;
     if (measured) this.doorbells.recordResult(agent, bell, "timeout");
@@ -275,6 +281,7 @@ export class Postman {
       if (!status || !LIVE_MAIL.some((s) => s === status)) this.wakeAlerts.delete(id);
     }
     for (const m of this.ctx.store.allMailByStatus(["rung"])) {
+      if (this.doorbells.acp.cancelling(m.to_agent)) continue;
       const lastReturn = this.presence.get(m.to_agent)?.lastReturnAt ?? 0;
       if (now - Math.max(Date.parse(m.rung_at!), lastReturn) < ring_retry_seconds * 1000) continue;
       // A delivered wake can be waiting in the client's queue while its current turn finishes.
@@ -297,6 +304,7 @@ export class Postman {
       if (this.doorbells.pick(agent)?.kind === "acp") this.kick(agent);
     }
     for (const m of this.ctx.store.allMailByStatus(["queued"])) {
+      if (this.doorbells.acp.cancelling(m.to_agent)) continue;
       if (now - Date.parse(m.created_at) < UNREACHABLE_ALERT_MS || this.wakeAlerts.has(m.id)) continue;
       const st = this.presence.status(m.to_agent);
       if (st === "working" || st === "waiting" || this.doorbells.pick(m.to_agent)) continue;
@@ -311,6 +319,7 @@ export class Postman {
     }
     // Queued mail that no doorbell can deliver (agent not parked / proxy gone, not polling, not busy) → ask the human.
     for (const m of this.ctx.store.allMailByStatus(["queued"])) {
+      if (this.doorbells.acp.cancelling(m.to_agent)) continue;
       if (now - Date.parse(m.created_at) < ring_retry_seconds * 1000) continue;
       const st = this.presence.status(m.to_agent);
       if (st === "working" || st === "armed" || st === "waiting") continue;
@@ -339,9 +348,13 @@ export class Postman {
   fetchInbox(agent: string, sessionId: string | undefined): Result {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
+    const acp = this.presence.acpAgent(sessionId) === agent;
+    if (this.isCancellingAcp(agent, sessionId))
+      return { mails: [], instructions: "本回合正在取消。结束后，协作桥会重新提示你取信。" };
     const mails = this.ctx.store.mailByStatus(agent, [...LIVE_MAIL]);
     const out: Result[] = [];
     for (const m of mails) {
+      if (acp && this.doorbells.acp.cancelling(agent)) break;
       if (m.kind === "task") {
         const task = this.payloads.task(m);
         if (!task) {
@@ -371,7 +384,7 @@ export class Postman {
       this.ctx.store.setMailStatus([m.id], "fetched");
       if (m.rung_at) this.ctx.log("rung_mail_fetched", { id: m.id, agent, sinceRingMs: Date.now() - Date.parse(m.rung_at) });
     }
-    if (this.presence.acpAgent(sessionId) === agent) this.doorbells.acp.fetched(agent, out.filter((mail) => !mail.void).map((mail) => String(mail.id)));
+    if (acp) this.doorbells.acp.fetched(agent, out.filter((mail) => !mail.void).map((mail) => String(mail.id)));
     this.ctx.onChange();
     const kind = this.presence.doorbellKind(agent);
     return {

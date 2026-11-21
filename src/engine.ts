@@ -61,6 +61,7 @@ export class Engine {
     this.leases = new Leases(ctx, this.presence, this.postman, {
       currentTask: (agent) => this.scheduler.currentTask(agent),
       schedule: (runId) => this.scheduler.schedule(runId),
+      resumeAfterCancellation: () => this.scheduler.resumeAfterCancellation(),
     });
     this.scheduler = new Scheduler(ctx, this.presence, this.postman, this.leases);
     this.meetings = new Meetings(ctx, this.presence, this.postman, this.scheduler);
