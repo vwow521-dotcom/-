@@ -8,7 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
-import { configureAcpLedger, queryProcesses, readLedger, sweepAcpOrphans, type LedgerEntry, type ProcessInfo } from "../src/doorbells/acp-process.js";
+import { configureAcpLedger, queryProcesses, readLedger, recordAcpProcess, sweepAcpOrphans, type LedgerEntry, type ProcessInfo } from "../src/doorbells/acp-process.js";
+import { AcpRpc } from "../src/doorbells/acp-rpc.js";
 
 interface Options {
   root: string;
@@ -59,11 +60,12 @@ function sweepDecisions(check: Options["check"]) {
     daemon: { pid: 10, created: t(1) }, supervisor: { pid: 20, created: t(2) }, agentProc: { pid: 30, created: t(3) }, ...fields,
   });
   const run = (entries: LedgerEntry[], world: Map<number, ProcessInfo> | null,
-    onKill: (pid: number, world: Map<number, ProcessInfo>) => void = (pid, w) => { w.delete(pid); }) => {
+    onKill: (pid: number, world: Map<number, ProcessInfo>) => void = (pid, w) => { w.delete(pid); }, queriesThatWork = Infinity) => {
     fs.writeFileSync(file, JSON.stringify(entries));
     const kills: number[] = [];
+    let queries = 0;
     const reports = sweepAcpOrphans({
-      query: (pids) => world && new Map([...world].filter(([pid]) => pids.includes(pid))),
+      query: (pids) => ++queries > queriesThatWork ? null : world && new Map([...world].filter(([pid]) => pids.includes(pid))),
       kill: (pid) => { kills.push(pid); if (world) onKill(pid, world); return true; },
     });
     return { reports, kills, kept: readLedger(file) };
@@ -87,11 +89,44 @@ function sweepDecisions(check: Options["check"]) {
   check(r.kept.length === 0 && r.kills.join() === "20,30", "sweep: an agent still running after its supervisor's tree is re-verified and then ended");
   r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(7))]));
   check(r.kills.join() === "20" && r.kept.length === 0, "sweep: an agent PID now owned by another process is not ended");
+  const unreadable = (target: number) => (pid: number, w: Map<number, ProcessInfo>) => { if (pid === target) w.set(pid, { pid, created: null, cmd: "" }); };
+  r = run([entry({ supervisor: null })], new Map([proc(30, t(3))]), unreadable(30));
+  check(r.kept.length === 1 && r.kills.join() === "30" && !r.reports.some((x) => x.kind === "acp_orphan_killed"),
+    "sweep: an agent still listed after taskkill but with an unreadable creation time is not counted as ended");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]), unreadable(20));
+  check(r.kept.length === 1 && r.kills.join() === "20" && !r.reports.some((x) => x.kind === "acp_orphan_killed"),
+    "sweep: a supervisor whose identity cannot be read after taskkill is not counted as ended, and its agent is left alone");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]), undefined, 1);
+  check(r.kept.length === 1 && r.kills.join() === "20", "sweep: when the re-check after ending the supervisor fails, the agent is not ended from the old snapshot");
+  r = run([entry({ project: undefined as unknown as string }), entry({ project: "relative" }), entry({ project: dir + "-other" })],
+    new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]));
+  check(r.kept.length === 3 && !r.kills.length, "sweep: entries without an explicit, absolute, matching project directory are only reported");
+}
+
+/** Identity capture fails closed: an unwritable ledger keeps every ACP message away from the agent. */
+async function ledgerWriteFailure(root: string, check: Options["check"]) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-acp-ledger-"));
+  const blocked = path.join(dir, "acp-hosts.json");
+  fs.mkdirSync(blocked); // a directory where the ledger file should be: every write fails
+  configureAcpLedger(blocked, dir);
+  const rejected = await recordAcpProcess("w", "agent.exe", process.pid, process.pid).then(() => false, (e: Error) => /台账/.test(e.message));
+  check(rejected, "recording an agent fails when the ledger cannot be written");
+  if (process.platform !== "win32") return;
+  const log = path.join(dir, "agent.jsonl");
+  const rpc = new AcpRpc({
+    command: process.execPath, args: [path.join(root, "scripts", "fake-acp-process.mjs")], cwd: dir,
+    env: { ...process.env, FAKE_PROC_LOG: log }, mcp: "stdio", mcpName: "bridge",
+  });
+  const refused = await rpc.initialize("smoke").then(() => false, (e: Error) => /台账/.test(e.message));
+  const methods = fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter((line) => line.includes('"method"')) : [];
+  await rpc.terminate();
+  check(refused && !methods.length, "with an unwritable ledger, AcpRpc refuses initialize and the agent receives nothing");
 }
 
 export async function smokeAcpProcess({ root, port, check, info = console.log }: Options) {
   console.log("\nL. Windows ACP process ownership");
   sweepDecisions(check);
+  await ledgerWriteFailure(root, check);
   if (process.platform !== "win32") {
     info("skipped: Windows only");
     return;

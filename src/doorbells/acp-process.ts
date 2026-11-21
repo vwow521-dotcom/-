@@ -113,18 +113,23 @@ export function readLedger(file = ledger?.file): LedgerEntry[] {
   }
 }
 
+/** Returns false when the ledger could not be written; callers that depend on the record must not proceed. */
 function writeLedger(entries: LedgerEntry[]) {
-  if (!ledger) return;
+  if (!ledger) return false;
+  const tmp = `${ledger.file}.${process.pid}.tmp`;
   try {
     fs.mkdirSync(path.dirname(ledger.file), { recursive: true });
-    const tmp = `${ledger.file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(entries, null, 2) + "\n");
     fs.renameSync(tmp, ledger.file);
-  } catch { /* The supervisor still covers this agent. */ }
+    return true;
+  } catch {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* nothing to clean */ }
+    return false;
+  }
 }
 
 function updateLedger(change: (entries: LedgerEntry[]) => LedgerEntry[]) {
-  if (ledger) writeLedger(change(readLedger()));
+  return !!ledger && writeLedger(change(readLedger()));
 }
 
 // ---------- per-agent supervision ----------
@@ -151,13 +156,14 @@ export function supervisorSpawn(command: string, args: readonly string[]) {
 export async function recordAcpProcess(agent: string, command: string, supervisorPid: number, agentPid: number): Promise<() => void> {
   if (!ledger) return () => {};
   const id = randomUUID();
-  updateLedger((entries) => [...entries, {
+  const remove = () => { updateLedger((entries) => entries.filter((e) => e.id !== id)); };
+  const written = updateLedger((entries) => [...entries, {
     id, agent, project: ledger!.project, command, at: new Date().toISOString(),
     daemon: { pid: process.pid, created: null },
     supervisor: { pid: supervisorPid, created: null },
     agentProc: { pid: agentPid, created: null },
   }]);
-  const remove = () => updateLedger((entries) => entries.filter((e) => e.id !== id));
+  if (!written) throw new Error(`无法写入后台进程台账：${ledger.file}`);
   let created = await (daemonCreated ??= ownCreated());
   if (!created) created = await (daemonCreated = ownCreated());
   const complete = (info: Map<number, ProcessInfo> | null) => !!info?.get(supervisorPid)?.created && !!info.get(agentPid)?.created;
@@ -167,12 +173,19 @@ export async function recordAcpProcess(agent: string, command: string, superviso
     remove();
     throw new Error("无法记录后台进程的精确身份（进程查询失败）");
   }
-  updateLedger((entries) => entries.map((e) => e.id !== id ? e : {
-    ...e,
+  const identity = {
     daemon: { pid: process.pid, created },
     supervisor: { pid: supervisorPid, created: info!.get(supervisorPid)!.created },
     agentProc: { pid: agentPid, created: info!.get(agentPid)!.created },
-  }));
+  };
+  updateLedger((entries) => entries.map((e) => e.id !== id ? e : { ...e, ...identity }));
+  // Open the gate only once the complete record can be read back from disk.
+  const stored = readLedger().find((e) => e.id === id);
+  if (stored?.daemon.created !== identity.daemon.created || stored?.supervisor?.created !== identity.supervisor.created
+    || stored?.agentProc.created !== identity.agentProc.created) {
+    remove();
+    throw new Error(`无法写入后台进程台账：${ledger.file}`);
+  }
   return remove;
 }
 
@@ -233,8 +246,10 @@ export function sweepAcpOrphans(deps: { query?: ProcessQuery; kill?: TreeKill } 
       return false;
     }
     live = new Map([...[...live].filter(([pid]) => !checked.includes(pid)), ...after]);
-    if (identify(owned, live) === "match") {
-      report("acp_orphan_skipped", e, role, owned.pid, "结束失败，保留记录");
+    // Only "gone" or "other" proves the end. A PID still listed whose creation time cannot be read is unconfirmed.
+    const now = identify(owned, live);
+    if (now === "match" || now === "unknown") {
+      report("acp_orphan_skipped", e, role, owned.pid, now === "match" ? "结束失败，保留记录" : "结束后身份无法核实，保留记录");
       return false;
     }
     report("acp_orphan_killed", e, role, owned.pid, reason);
@@ -243,8 +258,10 @@ export function sweepAcpOrphans(deps: { query?: ProcessQuery; kill?: TreeKill } 
 
   for (const e of entries) {
     if (!e.daemon?.pid || !e.agentProc?.pid) continue;
-    if (path.resolve(e.project ?? "") !== ledger.project) {
-      report("acp_orphan_skipped", e, "entry", e.agentProc.pid, "记录不属于本项目");
+    // The project must be stated, absolute and this one. Anything else cannot be verified and is only reported.
+    if (typeof e.project !== "string" || !path.isAbsolute(e.project) || path.resolve(e.project) !== ledger.project) {
+      report("acp_orphan_skipped", e, "entry", e.agentProc.pid, "记录没有写明本项目目录，保留记录");
+      keep.push(e);
       continue;
     }
     const daemon = identify(e.daemon, live);
@@ -263,7 +280,11 @@ export function sweepAcpOrphans(deps: { query?: ProcessQuery; kill?: TreeKill } 
       } else if (state === "other" || (state === "match" && !live.get(e.supervisor.pid)!.cmd.includes(SUPERVISOR_NAME))) {
         report("acp_orphan_skipped", e, "supervisor", e.supervisor.pid, "PID 已被其他进程使用");
       } else if (state === "match" && !end(e, "supervisor", e.supervisor, "监督进程身份核验通过")) {
-        pending = true;
+        // The supervisor's end was not confirmed (or the re-check failed, so `live` may be stale): leave the agent
+        // for the next start rather than act on an old snapshot.
+        report("acp_orphan_skipped", e, "agent", e.agentProc.pid, "监督进程未确认结束，代理留待下次核验");
+        keep.push(e);
+        continue;
       }
     }
     // `live` holds the fresh answer after the supervisor's tree was ended, so a gone agent is not ended twice.
