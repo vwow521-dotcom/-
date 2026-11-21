@@ -4,11 +4,12 @@
 // Node puts every non-detached child in a kill-on-close job, so when the daemon dies, Windows ends its direct
 // children at once. Processes that a non-Node agent (agy) started itself are not in that job, and once the
 // agent is gone, `taskkill /T` can no longer find them. So the daemon starts this supervisor detached (it
-// survives the daemon), and the supervisor starts the agent. When the owner goes away (IPC disconnect, or its
-// PID is gone), the agent is still alive, and `taskkill /T` ends the agent together with everything it started.
+// survives the daemon), and the supervisor starts the agent.
 //
-// The agent inherits this process's stdin/stdout/stderr, which are the owner's pipes, so ACP messages never
-// pass through here. The supervisor reports the agent's PID over IPC and exits with the agent's exit code.
+// The supervisor holds the agent's stdin/stdout/stderr and copies the bytes unchanged. Because of that, the
+// agent cannot see EOF or a broken pipe before the supervisor acts: when the owner goes away (IPC disconnect,
+// stdin EOF, or its PID is gone), the agent is still alive and `taskkill /T` ends it together with everything
+// it started. The supervisor reports the agent's PID over IPC and exits with the agent's exit code.
 import { execFile, spawn } from "node:child_process";
 
 const ownerPid = Number(process.argv[2]);
@@ -28,18 +29,35 @@ const send = (message) => {
 const env = { ...process.env };
 delete env.NODE_CHANNEL_FD;
 delete env.NODE_CHANNEL_SERIALIZATION_MODE;
-const agent = spawn(command, args, { stdio: "inherit", windowsHide: true, env });
+const agent = spawn(command, args, { stdio: "pipe", windowsHide: true, env });
 let ending = false;
+let finished = false;
+
+// Copy bytes unchanged in both directions. Never forward EOF to the agent: the owner never closes the agent's
+// input on purpose (it ends the tree instead), so an EOF here means the owner is gone.
+process.stdin.pipe(agent.stdin, { end: false });
+agent.stdout.pipe(process.stdout);
+agent.stderr.pipe(process.stderr);
+for (const stream of [agent.stdin, process.stdout, process.stderr]) stream.on("error", () => {});
 
 agent.once("error", (error) => {
+  finished = true;
   send({ type: "error", message: error.message });
   process.exit(127);
 });
-agent.once("exit", (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 if (agent.pid) send({ type: "agent", pid: agent.pid });
 
+// "close" fires after the agent's output is fully copied. Let this process exit on its own so the last bytes
+// reach the owner, with the agent's exit code.
+agent.once("close", (code, signal) => {
+  finished = true;
+  process.exitCode = code ?? (signal ? 1 : 0);
+  process.stdin.destroy();
+  if (process.connected) process.disconnect();
+});
+
 function endAgent() {
-  if (ending) return;
+  if (ending || finished) return;
   ending = true;
   if (!agent.pid || agent.exitCode !== null || agent.signalCode !== null) process.exit(1);
   execFile("taskkill.exe", ["/PID", String(agent.pid), "/T", "/F"], { windowsHide: true, timeout: 8000 }, () => {
@@ -48,7 +66,9 @@ function endAgent() {
   });
 }
 
+process.stdin.on("end", endAgent);
+process.stdin.on("error", endAgent);
 process.on("disconnect", endAgent);
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) process.on(signal, endAgent);
-// Backup only: IPC disconnect is the reliable signal that the owner died.
+// Backup only: IPC disconnect and stdin EOF are the reliable signals that the owner died.
 setInterval(() => { if (!alive(ownerPid)) endAgent(); }, 1000).unref();

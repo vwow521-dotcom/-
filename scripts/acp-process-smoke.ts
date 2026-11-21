@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import YAML from "yaml";
-import { queryProcesses, readLedger, type LedgerEntry } from "../src/doorbells/acp-process.js";
+import { configureAcpLedger, queryProcesses, readLedger, sweepAcpOrphans, type LedgerEntry, type ProcessInfo } from "../src/doorbells/acp-process.js";
 
 interface Options {
   root: string;
@@ -47,8 +47,51 @@ function supervisors() {
   return Number(out.trim());
 }
 
+/** The sweep's decisions with a simulated process table: no real process is touched. */
+function sweepDecisions(check: Options["check"]) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-acp-sweep-"));
+  const file = path.join(dir, "acp-hosts.json");
+  configureAcpLedger(file, dir);
+  const t = (n: number) => `2026-01-01T00:00:0${n}.0000000Z`;
+  const proc = (pid: number, created: string | null, cmd = "agent.exe"): [number, ProcessInfo] => [pid, { pid, created, cmd }];
+  const entry = (fields: Partial<LedgerEntry> = {}): LedgerEntry => ({
+    id: "e" + Math.random(), agent: "w", project: dir, command: "agent.exe", at: t(0),
+    daemon: { pid: 10, created: t(1) }, supervisor: { pid: 20, created: t(2) }, agentProc: { pid: 30, created: t(3) }, ...fields,
+  });
+  const run = (entries: LedgerEntry[], world: Map<number, ProcessInfo> | null,
+    onKill: (pid: number, world: Map<number, ProcessInfo>) => void = (pid, w) => { w.delete(pid); }) => {
+    fs.writeFileSync(file, JSON.stringify(entries));
+    const kills: number[] = [];
+    const reports = sweepAcpOrphans({
+      query: (pids) => world && new Map([...world].filter(([pid]) => pids.includes(pid))),
+      kill: (pid) => { kills.push(pid); if (world) onKill(pid, world); return true; },
+    });
+    return { reports, kills, kept: readLedger(file) };
+  };
+  const supervisorCmd = "node acp-supervisor.mjs 10 agent.exe";
+
+  let r = run([entry()], null);
+  check(r.kept.length === 1 && !r.kills.length && r.reports.every((x) => x.kind === "acp_orphan_skipped"),
+    "sweep: a failed process query ends nothing and keeps the ledger");
+  r = run([entry()], new Map([proc(10, null), proc(30, t(3))]));
+  check(r.kept.length === 1 && !r.kills.length, "sweep: a running daemon PID whose creation time cannot be read is not treated as exited");
+  r = run([entry({ daemon: { pid: 10, created: null } })], new Map([proc(10, t(9)), proc(30, t(3))]));
+  check(r.kept.length === 1 && !r.kills.length, "sweep: an entry without the daemon's creation time is kept while that PID runs");
+  r = run([entry({ supervisor: null })], new Map([proc(30, t(3))]), () => {});
+  check(r.kept.length === 1 && r.kills.length === 1 && !r.reports.some((x) => x.kind === "acp_orphan_killed"),
+    "sweep: a taskkill that leaves the agent running is not reported as ended and the entry is kept");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]), (pid, w) => { w.delete(pid); w.delete(30); });
+  check(r.kept.length === 0 && r.kills.join() === "20" && r.reports.filter((x) => x.kind === "acp_orphan_killed").length === 1,
+    "sweep: after the supervisor's tree is ended, a fresh query shows the agent gone and it is not ended again");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]));
+  check(r.kept.length === 0 && r.kills.join() === "20,30", "sweep: an agent still running after its supervisor's tree is re-verified and then ended");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(7))]));
+  check(r.kills.join() === "20" && r.kept.length === 0, "sweep: an agent PID now owned by another process is not ended");
+}
+
 export async function smokeAcpProcess({ root, port, check, info = console.log }: Options) {
   console.log("\nL. Windows ACP process ownership");
+  sweepDecisions(check);
   if (process.platform !== "win32") {
     info("skipped: Windows only");
     return;
@@ -57,17 +100,21 @@ export async function smokeAcpProcess({ root, port, check, info = console.log }:
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-smoke-acp-proc-"));
   const git = (...args: string[]) => execFileSync("git", ["-C", project, ...args], { encoding: "utf8" });
   git("init", "-q");
-  const logs = { w: path.join(project, "w.jsonl"), x: path.join(project, "x.jsonl") };
+  const logs = { w: path.join(project, "w.jsonl"), x: path.join(project, "x.jsonl"), y: path.join(project, "y.jsonl") };
+  const ledgerFile = path.join(project, ".bridge", "acp-hosts.json");
   const fake = path.join(root, "scripts", "fake-acp-process.mjs");
   const agent = (env: Record<string, string>) => ({
-    product: "antigravity", acp: { command: process.execPath, args: [fake], permissions: "deny", env },
+    product: "antigravity", acp: { command: process.execPath, args: [fake], permissions: "deny", env: { FAKE_PROC_LEDGER: ledgerFile, ...env } },
   });
   fs.writeFileSync(path.join(project, "bridge.config.yaml"), YAML.stringify({
-    agents: { w: agent({ FAKE_PROC_LOG: logs.w }), x: agent({ FAKE_PROC_LOG: logs.x, FAKE_PROC_EXIT_ON_PROMPT: "1" }) },
+    agents: {
+      w: agent({ FAKE_PROC_LOG: logs.w }),
+      x: agent({ FAKE_PROC_LOG: logs.x, FAKE_PROC_EXIT_ON_PROMPT: "1" }),
+      y: agent({ FAKE_PROC_LOG: logs.y, FAKE_PROC_EXIT_ON_EOF: "1" }),
+    },
     pipeline: [{ id: "implement", role: "实现", agent: "w" }],
     notify: { enabled: false },
   }));
-  const ledgerFile = path.join(project, ".bridge", "acp-hosts.json");
   const rows = (id: keyof typeof logs) => fs.existsSync(logs[id])
     ? fs.readFileSync(logs[id], "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
   const started = (id: keyof typeof logs) => rows(id).filter((row) => row.event === "started");
@@ -123,14 +170,22 @@ export async function smokeAcpProcess({ root, port, check, info = console.log }:
   try {
     // (a) Force-kill only the daemon (taskkill /F without /T). Windows would end its direct children anyway, but
     // the fake agent's child is detached, like what agy starts itself; only the supervisor can still reach it.
+    // y exits as soon as it sees stdin EOF: it must not see one before its supervisor has ended its tree.
     const first = await startDaemon();
     const a = await launch("w");
+    const y = await launch("y");
     const entryA = await recorded(a.pid);
-    check(alive(entryA.supervisor!.pid) && supervisors() === 1, "each ACP agent runs under one supervisor and has a ledger entry with exact creation times");
+    const entryY = await recorded(y.pid);
+    check(alive(entryA.supervisor!.pid) && supervisors() === 2, "each ACP agent runs under one supervisor and has a ledger entry with exact creation times");
+    check([...rows("w"), ...rows("y")].filter((row) => row.event === "identity").every((row) => row.recorded)
+      && rows("w").some((row) => row.event === "identity"), "the ledger holds the exact identity before the agent receives initialize");
     forceKill(first.pid);
     await until(() => first.exitCode !== null || first.signalCode !== null || !alive(first.pid), "daemon was not killed");
     const goneA = await until(() => !alive(a.pid) && !alive(a.child) && !alive(entryA.supervisor!.pid), "agent tree outlived a force-killed daemon", 5000).catch(() => false);
     check(goneA, "force-killing the daemon ends the agent, the process it started and the supervisor within 5 s");
+    const goneY = await until(() => !alive(y.pid) && !alive(y.child) && !alive(entryY.supervisor!.pid), "EOF-exiting agent left its process", 5000).catch(() => false);
+    check(goneY && !rows("y").some((row) => row.event === "stdin_end"),
+      "an agent that exits on stdin EOF is ended with its process before it can see EOF");
 
     // (b) An agent outlived both its supervisor and its daemon (forged: an unsupervised fake agent in the ledger).
     const orphanLog = path.join(project, "orphan.jsonl");
@@ -143,7 +198,7 @@ export async function smokeAcpProcess({ root, port, check, info = console.log }:
     const wrongTime = sleeper(), wrongCmd = sleeper(), unrelated = sleeper();
     sleepers.push(wrongTime, wrongCmd, unrelated);
     await sleep(300);
-    const created = queryProcesses([orphan.pid!, wrongCmd.pid!]);
+    const created = queryProcesses([orphan.pid!, wrongCmd.pid!]) ?? new Map<number, ProcessInfo>();
     check(!!created.get(orphan.pid!)?.created && !!created.get(wrongCmd.pid!)?.created, "precondition: exact creation times can be read");
     const old = "2000-01-01T00:00:00.0000000Z";
     const forged = (fields: Partial<LedgerEntry>): LedgerEntry => ({

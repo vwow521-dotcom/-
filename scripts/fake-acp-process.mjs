@@ -4,6 +4,8 @@
 // supervisor, taskkill /T or the startup sweep can end it.
 //   FAKE_PROC_LOG            JSONL log of what happened (pid, child pid, methods)
 //   FAKE_PROC_EXIT_ON_PROMPT exit (code 3) on session/prompt, leaving the child behind
+//   FAKE_PROC_EXIT_ON_EOF    exit at once on stdin EOF (a well-behaved agent), leaving the child behind
+//   FAKE_PROC_LEDGER         on initialize, log whether the bridge ledger already holds this agent's exact identity
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { createInterface } from "node:readline";
@@ -27,6 +29,14 @@ reader.on("line", (line) => {
   if (typeof method !== "string") return;
   log("method", { method });
   if (method === "initialize") {
+    if (process.env.FAKE_PROC_LEDGER) {
+      let recorded = false;
+      try {
+        const entry = JSON.parse(fs.readFileSync(process.env.FAKE_PROC_LEDGER, "utf8")).find((e) => e.agentProc?.pid === process.pid);
+        recorded = !!(entry?.agentProc.created && entry.supervisor?.created && entry.daemon?.created);
+      } catch { /* not recorded */ }
+      log("identity", { recorded });
+    }
     send({ id, result: { protocolVersion: 1, agentInfo: { name: "fake-proc", version: "1.0.0" },
       agentCapabilities: { loadSession: false, sessionCapabilities: { close: {} } } } });
   } else if (method === "session/new") {
@@ -43,8 +53,11 @@ reader.on("line", (line) => {
     send({ id, error: { code: -32601, message: "Method not supported" } });
   }
 });
-// Ignore EOF and broken pipes on purpose: a real agent may keep running after its client is gone.
-process.stdin.on("end", () => log("stdin_end"));
+// By default, ignore EOF and broken pipes: a real agent may keep running after its client is gone.
+process.stdin.on("end", () => {
+  log("stdin_end");
+  if (process.env.FAKE_PROC_EXIT_ON_EOF) process.exit(0);
+});
 process.stdin.on("error", (error) => log("stdin_error", { code: error.code }));
 process.stdout.on("error", () => {});
 setInterval(() => {}, 1 << 30);

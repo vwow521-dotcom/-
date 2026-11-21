@@ -36,14 +36,17 @@ export class AcpRpc {
   private agentPid?: number;
   private unrecord?: () => void;
   private spawnError?: string;
-  private announce?: () => void;
+  private announce!: (error?: Error) => void;
+  /** ACP traffic waits for this: on Windows, until the ledger holds the agent's exact identity. */
+  private readonly gate: Promise<void>;
 
   constructor(command: AcpCommand, callbacks?: {
     update(params: Json): void;
     permission(params: Json): unknown;
     exit(error: Error, code: number | null): void;
   }) {
-    this.ready = new Promise((resolve) => { this.announce = resolve; });
+    this.gate = new Promise<void>((resolve, reject) => { this.announce = (error) => error ? reject(error) : resolve(); });
+    this.ready = this.gate.catch(() => {});
     if (supervised) {
       // Windows: the supervisor is the agent's parent and ends its whole tree if this process dies (acp-process.ts).
       const host = supervisorSpawn(command.command, command.args);
@@ -53,8 +56,12 @@ export class AcpRpc {
       this.child.on("message", (message: { type?: string; pid?: number; message?: string }) => {
         if (message?.type === "agent" && Number.isInteger(message.pid) && !this.agentPid) {
           this.agentPid = message.pid;
-          this.unrecord = recordAcpProcess(command.env.BRIDGE_AGENT_ID ?? "probe", command.command, this.child.pid!, message.pid!);
-          this.announce?.();
+          // A failure rejects every request, so the host reports it and retries instead of running unrecorded.
+          recordAcpProcess(command.env.BRIDGE_AGENT_ID ?? "probe", command.command, this.child.pid!, message.pid!).then((remove) => {
+            this.unrecord = remove;
+            if (this.exit) remove();
+            this.announce();
+          }, (error: Error) => this.announce(error));
         } else if (message?.type === "error") this.spawnError = shortText(message.message);
       });
       // The IPC channel must not keep a short-lived owner (doctor --probe) alive.
@@ -63,7 +70,7 @@ export class AcpRpc {
       this.child = spawn(command.command, command.args, {
         cwd: command.cwd, env: command.env, stdio: "pipe", windowsHide: true, detached: true,
       });
-      this.announce?.();
+      this.announce();
     }
     this.child.stderr.resume();
     const reader = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
@@ -79,7 +86,7 @@ export class AcpRpc {
         this.pending.clear();
         reader.close();
         this.unrecord?.();
-        this.announce?.();
+        this.announce();
         resolve();
         callbacks?.exit(error, code);
       };
@@ -95,7 +102,7 @@ export class AcpRpc {
   get pid() { return supervised ? this.agentPid : this.child.pid; }
   /** The Windows supervisor (bin/acp-supervisor.mjs), the root of the agent's process tree. */
   get hostPid() { return supervised ? this.child.pid : undefined; }
-  /** Resolves once pid is known (at once off Windows), or when the process exits first. */
+  /** Resolves once pid is known and recorded (at once off Windows), or when identity capture fails or the process exits. */
   readonly ready: Promise<void>;
   get alive() { return !this.exit; }
 
@@ -111,7 +118,7 @@ export class AcpRpc {
 
   request<T>(method: string, params: Json, timeoutMs?: number): Promise<T> {
     const id = ++this.sequence;
-    return new Promise<T>((resolve, reject) => {
+    return this.gate.then(() => new Promise<T>((resolve, reject) => {
       if (this.exit) return reject(this.exit);
       const timer = timeoutMs ? setTimeout(() => {
         this.pending.delete(id);
@@ -123,11 +130,11 @@ export class AcpRpc {
         this.pending.delete(id);
         reject(error);
       });
-    });
+    }));
   }
 
   notify(method: string, params: Json) {
-    this.write({ method, params });
+    void this.gate.then(() => this.write({ method, params }), () => {});
   }
 
   terminate() {
