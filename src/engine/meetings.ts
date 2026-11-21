@@ -64,14 +64,21 @@ export class Meetings {
         "这是互评轮。逐条评价上一轮各方（包括你自己）的方案：同意什么、反对什么、为什么，以及你修正后的立场。不要改任何文件。",
       final:
         "这是定稿轮，由你负责。综合各轮讨论写出最终方案（content）、关键决策（decisions，每项 what + why）和任务清单（tasks，必填）。" +
+        "分配负责人时参考 members[].notes。" +
         "任务之间能并行就并行，有先后关系的用 depends_on 表示；尽量让每个任务的 paths 互不重叠。不要改任何文件。",
     };
+    const planning = m.round_kind === "proposal" || m.round_kind === "final";
     return {
       meeting_id: m.id,
       topic: m.topic,
       round: m.round,
       kind: m.round_kind,
       participants: m.participants,
+      ...(planning ? {
+        members: Object.entries(this.ctx.cfg.agents).map(([id, { product, notes }]) => ({
+          id, product: product ?? null, notes: notes || null,
+        })),
+      } : {}),
       facilitator: m.facilitator,
       you: agent,
       human_note: m.round_note ?? undefined,
@@ -80,7 +87,7 @@ export class Meetings {
       instructions:
         guide[m.round_kind] +
         (m.round_note ? "用户对本轮的要求见 human_note，必须回应。" : "") +
-        (m.round_kind === "final" || m.round_kind === "proposal" ? taskSpec : "") +
+        (planning ? taskSpec : "") +
         `写完后调用 submit_meeting_turn(agent_id, meeting_id=${m.id}, content${m.round_kind === "final" ? ", decisions, tasks" : m.round_kind === "proposal" ? ", tasks?" : ""})。`,
     };
   }

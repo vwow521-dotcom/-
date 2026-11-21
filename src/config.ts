@@ -53,6 +53,7 @@ const ConfigSchema = z
       z
         .object({
           product: z.string().optional(),
+          notes: z.string().trim().refine((notes) => [...notes].length <= 200, "notes 最多 200 字").optional(),
           // How the postman wakes this agent: an ordered list tried in turn (poll always last), a single
           // kind, or auto = the product's default chain (src/products/); for an
           // unknown product, whatever the client registers.
@@ -140,10 +141,12 @@ export type Config = z.infer<typeof ConfigSchema> & { projectDir: string; source
 export const DEFAULT_CONFIG_YAML = `agents:
   claude: { product: claude-code, doorbell: auto }
   codex:  { product: codex, doorbell: auto }
+  # notes 可选，最多 200 字。供会议分配任务时参考，在办公室的成员详情里也可查看。
   # 后台成员按需启用：
   # antigravity:
   #   product: antigravity
   #   doorbell: auto
+  #   notes: "适合文档、摘要和文字类第二意见"
   #   acp: { mcp: stdio, mode: accept-edits, permissions: deny }
   # deepseek:
   #   product: deepseek-harness

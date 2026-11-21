@@ -6,6 +6,7 @@ agents:
   antigravity:
     product: antigravity
     doorbell: auto
+    notes: "轻活：文档、文案、纪要、摘要、文字类第二意见；额度有限，不分配重编码和最终审查"
     acp:
       command: '%LOCALAPPDATA%\agy\bin\agy.exe'
       args: [acp, --disable-telemetry]
@@ -15,6 +16,7 @@ agents:
   deepseek:
     product: deepseek-harness
     doorbell: auto
+    notes: "轻活：文档、文案、纪要、摘要、文字类第二意见；额度有限，不分配重编码和最终审查"
     acp:
       command: 'E:\Deepseek-Harness\DeepSeek Harness.exe'
       args: [--expose-internals, 'E:\Deepseek-Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js', --profile, acp, --patch, bridge.deepseek-acp.patch.yaml]

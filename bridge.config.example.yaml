@@ -7,10 +7,12 @@
 agents:
   claude: { product: claude-code, doorbell: auto }
   codex:  { product: codex, doorbell: auto }
+  # notes 可选，最多 200 字。供会议分配任务时参考，在办公室的成员详情里也可查看。
   # 后台成员按需启用：
   # antigravity:
   #   product: antigravity
   #   doorbell: auto
+  #   notes: "适合文档、摘要和文字类第二意见"
   #   acp: { mcp: stdio, mode: accept-edits, permissions: deny }
   # deepseek:
   #   product: deepseek-harness

@@ -55,6 +55,7 @@ export function renderMemberDetails(agent, ids, delivery) {
     "），然后按返回的 protocol 工作。交接单和进度汇报用中文。";
   const info = [
     ["产品版本", product ? product.label + " " + (product.version === "unknown" ? "版本未知" : product.version) : ""],
+    ["备注", agent.notes],
     ["MCP 客户端", product?.client],
     ["门铃", (agent.doorbellLabel || agent.doorbell) + (agent.doorbell === "poll" ? "" : agent.doorbellArmed ? " · 已接通" : " · 未接通")],
     ["门铃顺序", agent.doorbellChain.join(" → ")],

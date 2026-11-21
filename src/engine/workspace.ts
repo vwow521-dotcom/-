@@ -203,6 +203,7 @@ export class Workspace {
       if (delivery) deliveries.set(id, delivery);
       return {
         id,
+        notes: this.ctx.cfg.agents[id].notes || null,
         roles: this.presence.rolesOf(id),
         // What it is on right now: live stages of the open run, and a meeting turn it still owes.
         doing: [
