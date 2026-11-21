@@ -107,7 +107,7 @@ export class Meetings {
 
   private voidRoundMail(m: Meeting) {
     const open = this.ctx.store.mailWithPrefix(`meeting-${m.id}-`).filter((x) => [...LIVE_MAIL, "fetched"].includes(x.status as any));
-    this.ctx.store.setMailStatus(open.map((x) => x.id), "void");
+    this.postman.voidMails(open.map((x) => x.id));
   }
 
   startMeeting(topic: string, participants?: string[], facilitator?: string): Result {

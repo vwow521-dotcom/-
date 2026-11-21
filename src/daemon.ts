@@ -53,6 +53,12 @@ app.post("/mcp", async (req, res) => {
     }
     const socket = req.header("x-bridge-claude-socket");
     const pipe = req.header("x-bridge-claude-pipe");
+    const hint = req.header("x-bridge-doorbell");
+    const acpAgent = hint === "acp" ? req.header("x-bridge-agent") : undefined;
+    if (hint === "acp" && (!acpAgent || !engine.doorbells.acp.connecting(acpAgent))) {
+      res.status(409).json({ jsonrpc: "2.0", error: { code: -32000, message: "ACP worker is not running" }, id: null });
+      return;
+    }
     const client: BridgeClient = {
       name: req.header("x-bridge-client")?.slice(0, 160) ?? String(req.body.params.clientInfo?.name ?? "").slice(0, 160),
       claudeSocket: socket === "present" || socket === "absent"
@@ -63,7 +69,7 @@ app.post("/mcp", async (req, res) => {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (id) => {
         transports.set(id, t);
-        engine.presence.setSessionDoorbell(id, req.header("x-bridge-doorbell"));
+        engine.presence.setSessionDoorbell(id, hint, acpAgent);
         engine.context.log("mcp_session_open", { session: id, client: req.body?.params?.clientInfo, upstream_client: client.name });
       },
     });
@@ -73,7 +79,7 @@ app.post("/mcp", async (req, res) => {
       engine.context.log("mcp_session_close", { session: t.sessionId });
       engine.presence.sessionClosed(t.sessionId);
     };
-    await buildServer(engine, client).connect(t);
+    await buildServer(engine, client, acpAgent).connect(t);
     transport = t;
   }
   await transport.handleRequest(req, res, req.body);
@@ -176,6 +182,23 @@ app.post("/api/questions/:id/answer", (req, res) => {
   reply(res, engine.workspace.answer(Number(req.params.id), answer));
 });
 app.post("/api/agents/:id/release", (req, res) => reply(res, engine.presence.release(req.params.id, "human")));
+app.post("/api/agents/:id/acp/stop", async (req, res) => {
+  const stop = engine.doorbells.acp.stop(req.params.id);
+  if (!stop) return void reply(res, { error: "该成员没有 ACP 配置" });
+  await stop;
+  reply(res, { ok: true });
+});
+app.post("/api/agents/:id/acp/restart", async (req, res) => {
+  const id = req.params.id;
+  if (!engine.doorbells.acp.snapshot(id)) return void reply(res, { error: "该成员没有 ACP 配置" });
+  engine.doorbells.resetCooldown(id, "acp");
+  try {
+    await engine.doorbells.acp.restart(id);
+    reply(res, { ok: true });
+  } catch (error) {
+    reply(res, { error: (error as Error).message });
+  }
+});
 
 // The human's chat: `mentions` and/or @names in the text pick who is woken.
 app.post("/api/chat", (req, res) => {
@@ -266,7 +289,15 @@ try {
 
 const address = server.address();
 const port = typeof address === "object" && address ? address.port : PORT;
-const engine = new Engine(cfg, new Store(projectDir));
+const bridgeUrl = `http://127.0.0.1:${port}`;
+const engine = new Engine(cfg, new Store(projectDir), bridgeUrl, async (agent) => {
+  const owned = [...transports].filter(([id]) => engine.presence.acpAgent(id) === agent);
+  for (const [id] of owned) {
+    transports.delete(id);
+    engine.presence.sessionClosed(id);
+  }
+  await Promise.allSettled(owned.map(([, transport]) => transport.close()));
+});
 engine.presence.isSessionOpen = (id) => transports.has(id);
 engine.context.notifyHuman = (title, body) => {
   if (cfg.notify.enabled) toast(title, body, `http://127.0.0.1:${port}/`);
@@ -279,9 +310,31 @@ engine.context.onChange = () => {
   }, 150);
 };
 
+async function shutdown() {
+  if (engine.postman.shuttingDown) return;
+  engine.postman.shuttingDown = true;
+  await engine.doorbells.acp.shutdown();
+  for (const client of sseClients) client.end();
+  await Promise.allSettled([...transports.values()].map((transport) => transport.close()));
+  server.close();
+  process.exit(0);
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"] as const) {
+  if (signal !== "SIGBREAK" || process.platform === "win32") process.on(signal, () => void shutdown());
+}
+if (process.send) {
+  // A supervising process can request a graceful shutdown on Windows, where child.kill() is immediate.
+  process.on("message", (message) => { if (message === "shutdown") void shutdown(); });
+  process.on("disconnect", () => void shutdown());
+}
+
 engine.context.log("server_start", { port, project: projectDir, config: cfg.source, pollSeconds: cfg.wait.poll_seconds });
 const repo = await isRepo(projectDir);
 console.log(`项目:  ${projectDir}${repo ? "" : "  （警告：不是 git 仓库，交接不会自动提交）"}`);
 console.log(`配置:  ${cfg.source}`);
 console.log(`MCP:   http://127.0.0.1:${port}/mcp`);
 console.log(`面板:  http://127.0.0.1:${port}/`);
+for (const agent of engine.presence.agentIds()) {
+  if (engine.doorbells.chain(agent).includes("acp") && engine.doorbells.acp.possible(agent)) engine.postman.retryAcpMail(agent);
+}

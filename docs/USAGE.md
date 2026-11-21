@@ -149,3 +149,33 @@ ai-bridge update     # 临时目录取 GitHub main → npm ci → npm pack → n
 - 运行前最好先关掉 Codex，否则 Codex 可能用它内存里的旧配置覆盖 `~/.codex/config.toml`。
 
 在源码仓库里，`npm run reinstall` 会安装**本地工作区**的版本（打包 → 全局安装 → `setup --refresh` → doctor），开发时用。各项目的 `.bridge/` 数据和 `bridge.config.yaml` 不受影响。
+
+## 9. 后台成员
+
+把下面两个成员按需加入项目 `bridge.config.yaml` 的 `agents`，并根据实际安装位置调整 DeepSeek Harness 的路径。配置生效后，第一次有信时桥会启动后台进程。你依然可以从 Antigravity 窗口或 DeepSeek TUI 加入，前台正在轮询时由前台取信。
+
+```yaml
+agents:
+  antigravity:
+    product: antigravity
+    doorbell: auto
+    acp:
+      mcp: stdio
+      mode: accept-edits
+      permissions: deny
+  deepseek:
+    product: deepseek-harness
+    doorbell: auto
+    acp:
+      command: 'E:\Deepseek-Harness\DeepSeek Harness.exe'
+      args: [--expose-internals, 'E:\Deepseek-Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js', --profile, acp]
+      env: { ELECTRON_RUN_AS_NODE: '1' }
+      mcp: http
+      permissions: deny
+```
+
+- **启动**。Antigravity 默认找 `%LOCALAPPDATA%\agy\bin\agy.exe`，也会从 PATH 查找 `agy.exe`。DeepSeek Harness 请填写 exe 和 ACP 参数。桥展开命令和参数中的 `%变量名%`，默认在项目目录启动。配置 `acp.cwd` 可以指定另一个工作目录。
+- **权限**。`permissions: deny` 是默认值，桥会尝试选「拒绝一次」。`allow` 优先选「允许一次」，缺少该项时选「始终允许」。权限决定可以在成员详情查看。
+- **观察和停止**。在「办公室」点成员详情，可查看后台状态、最近输出、权限决定和重试时间。「停止后台」会结束当前回合和进程，之后可点「重启后台」恢复。任务栏的「停止」会取消正在处理该任务的后台回合。
+- **DeepSeek 账号**。内置 `acp` profile 默认走 `deepseek-official` API Key 路由。若使用已经登录的 Harness 账号，可以把本仓库的 [bridge.deepseek-acp.patch.yaml](../bridge.deepseek-acp.patch.yaml) 放到项目目录，并在 `args` 末尾追加 `--patch, bridge.deepseek-acp.patch.yaml`。这让该进程选择 `deepseek-account` 下的 `deepseek-flash`。 [DeepSeek 模型配置](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers)
+- **体检**。`ai-bridge doctor --project <目录>` 检查命令和安装版本。加 `--probe` 会读取 ACP 服务版本、会话能力和 HTTP MCP 支持，探针只发 `initialize`。

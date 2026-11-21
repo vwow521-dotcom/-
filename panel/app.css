@@ -539,6 +539,7 @@ fieldset { border: 1px solid var(--line); padding: 6px 10px 8px; min-width: 0; }
 #member-detail dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 6px 12px; }
 #member-detail dd { margin: 0; }
 #member-detail details { margin: 10px 0; }
+.acp-output { max-height: 16rem; overflow: auto; white-space: pre-wrap; }
 #member-detail .button-row { margin-top: 8px; }
 .wake-copy { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
 .wake-copy input { max-width: 100%; width: 100%; }

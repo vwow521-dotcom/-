@@ -20,7 +20,14 @@ export interface ProductProfile {
   readonly clientNames: readonly string[];
   readonly doorbells: readonly DoorbellKind[];
   readonly verifiedVersions: readonly string[];
-  detectVersion(): Promise<string>;
+  readonly acp?: {
+    command?: string;
+    pathFallback?: string;
+    args?: readonly string[];
+    mcp: "stdio" | "http";
+    mcpName?: string;
+  };
+  detectVersion(command?: string): Promise<string>;
   readonly setupHint?: string;
   setup(cli: ProductCli): void;
   uninstall(cli: ProductCli): void;

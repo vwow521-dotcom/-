@@ -11,7 +11,7 @@ const text = (obj: unknown) => ({ content: [{ type: "text" as const, text: JSON.
 const version: string = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const prompt = (message: string) => ({ messages: [{ role: "user" as const, content: { type: "text" as const, text: message } }] });
 
-export function buildServer(engine: Engine, client: BridgeClient): McpServer {
+export function buildServer(engine: Engine, client: BridgeClient, acpAgent?: string): McpServer {
   const server = new McpServer({ name: "ai-bridge", version });
   const ids = engine.presence.agentIds().join(", ");
   const agentId = z.string().describe(`你的身份，可选：${ids}`);
@@ -29,6 +29,9 @@ export function buildServer(engine: Engine, client: BridgeClient): McpServer {
     "调用 bridge 的 fetch_inbox，填写加入时返回的 agent_id，按取信结果继续工作。尚未加入时先调用 join，不填 agent_id，按返回的 protocol 工作。",
   ));
   const withAgent = async (agent: string, session: string | undefined, run: () => Result | Promise<Result>) => {
+    if (acpAgent && acpAgent !== agent) return text({ error: `此后台会话只服务于 ${acpAgent}。` });
+    if (acpAgent && (engine.presence.acpAgent(session) !== acpAgent || !engine.doorbells.acp.connecting(acpAgent)))
+      return text({ error: "后台会话已停止。" });
     const recovered = engine.presence.recoverBinding(agent, session);
     const result = await run();
     if (!recovered) return text(result);
@@ -56,6 +59,8 @@ export function buildServer(engine: Engine, client: BridgeClient): McpServer {
       },
     },
     async ({ agent_id, takeover, _doorbell, _recovery }, extra) => {
+      if (acpAgent && agent_id && agent_id !== acpAgent) return text({ error: `此后台会话只服务于 ${acpAgent}。` });
+      agent_id ??= acpAgent;
       if (agent_id === undefined) {
         const product = productByClient(client);
         const matches = product ? engine.presence.agentIds().filter((id) => productById(engine.cfg.agents[id].product) === product) : [];

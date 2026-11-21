@@ -173,7 +173,7 @@ S1 成功，Claude 一侧就彻底不用轮询。S2 不论结果如何，Codex �
 | M2b ✅ | 邮局 + 回执 + 去重；Claude 门铃（stdio 转接程序注入消息）；Codex 门铃（Stop hook 停靠）；`wait_for_mail` 兜底；Windows 通知 |
 | M2c ✅ | 会议引擎（多轮互评、写入 doc/meetings）+ 任务 DAG + 文件租约 + 按任务范围提交（见第 13 节） |
 | M2d | 按原型实现面板：圆桌、看板（含依赖）、审批、笔记 |
-| M3 | ACP 后台 worker；剪贴板成员适配；接入 Gemini、DeepSeek |
+| M3 | ACP 后台成员：Antigravity、DeepSeek Harness；剪贴板成员暂缓 |
 
 ## 参考
 
@@ -367,4 +367,14 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
   - 叫醒确认按调用序号判断：每次工具调用（以及 `wait_for_mail` 返回）让 `presence.callSeq` 加一，按铃时记下当时的序号，`checkWake` 看序号有没有增加。触发按铃的那次调用（例如交接时给自己派了下一阶段）在按铃前已经计数，不算醒；按铃后同一毫秒的新调用算醒。被接管的旧会话的 `wait_for_mail` 结束时不计数。宽限和超时仍按墙钟。
   - `events` 新增可空列 `meeting_id`。会议事件由 `ctx.event(…, meeting_id)` 显式写入。旧库首次打开时按桥历来的事件模板（以「会议 #N 」「你打回了/你批准了会议 #N 」开头，或以该行 agent 加「 在会议 #N 」开头，成员名可含空格）回填一次，模板以外的文字和不存在的会议编号留空。加列和回填在同一个事务里，中途失败会整体回滚，下次启动重来。索引：`events(run_id, created_at)`、`events(meeting_id, created_at)`、`handoffs(run_id)`、`attempts(run_id)`、`meeting_turns(meeting_id)`。文件夹列表按每个运行和会议走索引取最近活动，不再每次聚合全部历史；文件夹事件用 `run_id = ? OR meeting_id = ?`。0.9.0 用文本拼接 `'会议 #' || ?` 匹配会议事件，JS 数字绑定成 REAL 后变成 `#1.0`，没有运行的会议文件夹因此一条事件也显示不出来；改用列以后这个问题一并消失。
   - 纪要短标题里数字之间的点不算标点，`收尾 0.9.0 的问题` 得到 `收尾-0.9.0-的问题`。
+
+## 23. M3：ACP 后台成员（0.10.0）
+
+- **连接与唤醒**。`agents.<id>.acp` 配置子进程、工作目录、MCP 传输和权限。首次有信时启动，依次执行 `initialize`、建会话及可选的 `session/set_mode`。Antigravity 的 stdio 代理以 `bridge_acp` 注册，避开交互配置中已经加载的 `bridge`。DeepSeek Harness 以 HTTP MCP 直接连接。子进程环境过滤 `CLAUDE_CODE_*` 和桥的其他门铃变量。提示里的工作内容仍然从 MCP 收件箱取得。 [ACP 会话规范](https://agentclientprotocol.com/protocol/v1/session-setup) · [Antigravity MCP 配置](https://antigravity.google/docs/cli-settings)
+- **复用与补投**。`agent_endpoints` 以 `acp-session` 保存每个成员的会话 ID。重启进程后按能力尝试 `resume`、`load`，再新建。DeepSeek Harness 的 MCP 插件在守护进程断线后不会自动重连，因此 HTTP 成员跨守护进程重启一律新建会话。每个成员同时只有一个 `session/prompt`。本轮结束时检查没取走的信，每封信至多立即补发一次，后续沿用邮局的重投间隔。
+- **交互优先**。阻塞中的 `wait_for_mail` 先取信，最近一次轮询在 `wait.stale_after_seconds` 内也会暂缓 ACP。后台 MCP 以 `x-bridge-agent` 和 `x-bridge-doorbell: acp` 登记身份，桥为它的 `join` 补接管参数。被接管的前台会话会收到「后台会话正在处理协作桥的信」。后台回合领完信后直接结束。
+- **取消、退避和退出**。停止运行、任务被打回替换或信件作废时，对涉及这封信的活动回合发 `session/cancel`。进程或协议失败后，两次自动重试分别等待 30 秒和 2 分钟。第三次失败后等待手动重启，门铃链降级仍使用全局的 `doorbells.cooldown_seconds`（默认 10 分钟）。停止后台或协作桥退出时先取消正在执行的回合，再按能力发 `session/close`，之后结束进程树。Windows 使用 `taskkill /T /F`。 [ACP 取消规范](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation)
+- **观察与体检**。成员详情显示后台状态、下次重试、最近 50 行代理输出和最近权限决定。代理输出只在内存里保留。启动、初始化、新建或恢复、响铃、结束、权限、退出及取消都有 `acp_*` 事件。工具调用还记录短标题和状态。`doctor --probe --project <目录>` 对每个后台成员只执行 `initialize`。本机探针确认 Antigravity ACP Server 1.5.13 支持恢复、加载和关闭，DeepSeek Harness 0.2.2-rc.5 内置的 ACP 0.0.1 支持 HTTP MCP、恢复和关闭。
+- **成员分工**。Antigravity 和 DeepSeek Harness 适合文档、文案、纪要和第二意见。重编码和最终审查继续交给 Codex、Claude。两种产品已有 ACP，剪贴板成员适配暂缓。
+- **真实演示**。在 7879 的临时 Git 项目中，Antigravity 新建会话 5.157 秒，实现回合 43.391 秒，提交 `9893e93`。DeepSeek 新建会话 1.141 秒，审查回合 15.411 秒，提交 `7a6ed82`，流程进入人工审批。随后 `@deepseek` 的聊天回合 3.106 秒，复用了审查的会话。两个后台进程经面板停止并查到 PID 已退出。DeepSeek 自带 `acp` profile 默认用需要 API Key 的 `deepseek-official`。本仓库向该进程传入 `--patch bridge.deepseek-acp.patch.yaml` 来使用桌面已登录的 `deepseek-account` 路由。 [DeepSeek 账号模型](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#deepseek-account-models)
 

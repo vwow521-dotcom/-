@@ -1,6 +1,7 @@
 // The doorbell registry: per-agent chains and the drivers behind them.
 import type { Config } from "../config.js";
 import { productById } from "../products/index.js";
+import { AcpDoorbell, type AcpBindings } from "./acp.js";
 import { CODEX_THREAD, CodexQueueDoorbell } from "./codex-queue.js";
 import { ParkedDoorbell } from "./parked.js";
 import { PollDoorbell } from "./poll.js";
@@ -41,6 +42,7 @@ export class Doorbells {
   readonly claudeSocket: ParkedDoorbell;
   readonly codexHook: ParkedDoorbell;
   readonly codexQueue: CodexQueueDoorbell;
+  readonly acp: AcpDoorbell;
   readonly poll: PollDoorbell;
   private byKind: Map<DoorbellKind, Doorbell>;
   private outcomes = new Map<string, Map<DoorbellKind, DoorbellStats>>();
@@ -49,6 +51,7 @@ export class Doorbells {
     private cfg: Config,
     private ctx: DoorbellContext,
     isPolling: (agent: string) => boolean,
+    acpBindings: AcpBindings,
   ) {
     this.claudeSocket = new ParkedDoorbell(
       "claude-socket",
@@ -67,8 +70,9 @@ export class Doorbells {
       (agent) => ctx.product(agent) === "codex" || !!ctx.store.endpoint(agent, CODEX_THREAD),
     );
     this.codexQueue = new CodexQueueDoorbell(ctx);
+    this.acp = new AcpDoorbell(cfg, ctx, acpBindings);
     this.poll = new PollDoorbell(isPolling);
-    this.byKind = new Map<DoorbellKind, Doorbell>([this.claudeSocket, this.codexQueue, this.codexHook, this.poll].map((d) => [d.kind, d]));
+    this.byKind = new Map<DoorbellKind, Doorbell>([this.claudeSocket, this.codexQueue, this.codexHook, this.acp, this.poll].map((d) => [d.kind, d]));
   }
 
   get(kind: DoorbellKind): Doorbell {
@@ -124,6 +128,13 @@ export class Doorbells {
     this.recordResult(agent, bell, bell.verify ? "pending" : "delivered");
   }
 
+  resetCooldown(agent: string, kind: DoorbellKind) {
+    const stats = this.outcomes.get(agent)?.get(kind);
+    if (!stats) return;
+    stats.degradedUntil = null;
+    resetFailureStreak(stats);
+  }
+
   recordResult(agent: string, bell: Doorbell, outcome: WakeResult, cooldown = false) {
     const stats = this.recordFor(agent, bell.kind);
     stats.lastResult = outcome;
@@ -167,6 +178,7 @@ export class Doorbells {
     this.ctx.log("doorbell_degraded", { agent, via: bell.kind, until, failures: stats.consecutiveFailures });
     this.ctx.event(agent, "doorbell_degraded", agent + " 的「" + bell.label + "」暂时降级");
     setTimeout(() => {
+      if (stats.degradedUntil !== until) return;
       stats.degradedUntil = null;
       resetFailureStreak(stats);
       this.ctx.log("doorbell_recovered", { agent, via: bell.kind });

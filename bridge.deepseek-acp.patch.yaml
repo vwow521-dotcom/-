@@ -1,0 +1,5 @@
+# Select the signed-in desktop account for the ACP profile in this project.
+- id: acp
+  config:
+    provider: deepseek-account
+    model: deepseek-flash

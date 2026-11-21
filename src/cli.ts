@@ -16,6 +16,7 @@ import path from "node:path";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { installedVersion } from "./diagnostics/github.js";
+import { acpChecks } from "./diagnostics/acp.js";
 import { probe } from "./diagnostics/probe.js";
 import { products, versionWarning } from "./products/index.js";
 import type { ProductCli } from "./products/types.js";
@@ -260,8 +261,10 @@ function proxyResponds(): Promise<string | null> {
 async function doctor() {
   console.log(`协作桥 ${VERSION} 体检（安装位置 ${PKG}）`);
   const print = { ok, bad, info };
+  const projectDir = path.resolve(cli.project ?? ".");
   if (flag("probe")) {
-    for (const check of await probe(bridgeRunning)) print[check.state](check.text);
+    const checks = await Promise.all([probe(bridgeRunning), acpChecks(projectDir, VERSION, true)]);
+    for (const check of checks.flat()) print[check.state](check.text);
     return;
   }
   const built = `${short(BUILD.commit)}${BUILD.dirty ? "，构建时有未提交改动" : ""}${BUILD.builtAt ? `，构建于 ${BUILD.builtAt.slice(0, 16).replace("T", " ")}` : ""}`;
@@ -271,8 +274,9 @@ async function doctor() {
   if (maj > 22 || (maj === 22 && min >= 13)) ok(`Node ${process.versions.node}`);
   else bad(`Node ${process.versions.node}：需要 22.13 或更新（内置 SQLite）`);
 
-  const versions = await Promise.all(products.map((product) => product.detectVersion()));
-  for (const [i, product] of products.entries()) {
+  const desktop = products.filter((product) => !product.acp);
+  const versions = await Promise.all(desktop.map((product) => product.detectVersion()));
+  for (const [i, product] of desktop.entries()) {
     product.doctor(cli);
     const version = versions[i];
     const warning = versionWarning(product, version);
@@ -283,6 +287,7 @@ async function doctor() {
     } else if (version === "unknown") info(detail);
     else ok(detail + "（门铃已验证）");
   }
+  for (const check of await acpChecks(projectDir, VERSION, false)) print[check.state](check.text);
 
   const tools = await proxyResponds();
   if (tools === null) bad("转接程序没有响应");
@@ -304,7 +309,8 @@ function help() {
                                   为项目启动协作桥（面板 http://127.0.0.1:7878/）
                                   端口已被占用时请使用已有面板或另选空闲端口
   ai-bridge doctor                检查配置是否一致、安装是否和 GitHub 上的最新版一致
-  ai-bridge doctor --probe        只读检查门铃命令、数据格式和代理套接字报告
+  ai-bridge doctor --probe [--project <目录>]
+                                  检查门铃和格式；ACP 只发 initialize，不建会话
   ai-bridge update [--ref <分支|标签|提交>] [--force]
                                   从 GitHub 重新安装，然后只刷新已经配置了 bridge 的客户端
   ai-bridge setup --refresh       只更新已有的配置，不新增（update 会自动调用）

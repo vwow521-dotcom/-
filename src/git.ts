@@ -18,12 +18,13 @@ export async function isRepo(cwd: string) {
 }
 
 export async function dirtyFiles(cwd: string): Promise<string[]> {
-  const r = await git(cwd, ["status", "--porcelain"]);
+  // Panel refreshes must not acquire the index lock while a handoff stages or commits changes.
+  const r = await git(cwd, ["--no-optional-locks", "status", "--porcelain"]);
   return r.ok && r.out ? r.out.split("\n") : [];
 }
 
 // Scope the old and new paths of a rename independently. NULs preserve literal filenames.
-const changedFileArgs = ["status", "--porcelain=v1", "-z", "--no-renames", "-uall"];
+const changedFileArgs = ["--no-optional-locks", "status", "--porcelain=v1", "-z", "--no-renames", "-uall"];
 const parseChangedFiles = (out: string) => out.split("\0").filter(Boolean).map((entry) => entry.slice(3));
 
 /** Paths (forward slashes, relative to the repo root) with uncommitted changes, including untracked files. */
@@ -35,7 +36,7 @@ export async function changedFiles(cwd: string): Promise<string[]> {
 /** Capture the task's baseline before publishing a new assignment. */
 export function snapshotChangedFiles(cwd: string): string[] {
   try {
-    const out = execFileSync("git", ["--no-optional-locks", "-C", cwd, ...changedFileArgs], {
+    const out = execFileSync("git", ["-C", cwd, ...changedFileArgs], {
       encoding: "utf8",
       maxBuffer: MAX_BUFFER,
       stdio: ["ignore", "pipe", "ignore"],

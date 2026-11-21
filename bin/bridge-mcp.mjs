@@ -20,8 +20,10 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { CallToolRequestSchema, ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 
 const BASE = (process.env.BRIDGE_URL ?? "http://127.0.0.1:7878").replace(/\/$/, "");
-const SOCK = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
-const TOKEN = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
+const ACP = process.env.BRIDGE_DOORBELL === "acp";
+const ACP_AGENT = ACP ? process.env.BRIDGE_AGENT_ID : undefined;
+const SOCK = ACP ? undefined : process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+const TOKEN = ACP ? undefined : process.env.CLAUDE_CODE_MESSAGING_TOKEN;
 const VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 const LOG_DIR = path.join(os.tmpdir(), "ai-bridge");
 fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -111,7 +113,8 @@ async function getClient() {
       "x-bridge-client": (server.getClientVersion()?.name ?? "").replace(/[^ -~]/g, "?").slice(0, 160),
       "x-bridge-claude-socket": SOCK ? "present" : "absent",
       "x-bridge-claude-pipe": claudePipe(),
-      ...(SOCK && TOKEN ? { "x-bridge-doorbell": "claude-socket" } : {}),
+      ...(ACP ? { "x-bridge-doorbell": "acp", ...(ACP_AGENT ? { "x-bridge-agent": ACP_AGENT } : {}) }
+        : SOCK && TOKEN ? { "x-bridge-doorbell": "claude-socket" } : {}),
     };
     const transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"), { requestInit: { headers } });
     httpTransport = transport;

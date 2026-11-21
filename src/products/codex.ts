@@ -201,7 +201,7 @@ export const codex: ProductProfile = {
   clientNames: ["codex-mcp-client", "codex"],
   doorbells: ["codex-queue", "codex-hook", "poll"],
   verifiedVersions: ["0.170", "0.171"],
-  detectVersion: detectCodexVersion,
+  detectVersion: () => detectCodexVersion(),
   setupHint: "在 Codex 的 Settings > Hooks（或输入框旁的 Review hooks）里信任新的 Stop hook。",
   setup,
   uninstall,

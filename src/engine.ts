@@ -23,11 +23,12 @@ export class Engine {
   readonly workspace: Workspace;
   readonly chat: Chat;
   readonly diagnostics: Diagnostics;
+  readonly doorbells: Doorbells;
 
-  constructor(readonly cfg: Config, store: Store) {
+  constructor(readonly cfg: Config, store: Store, bridgeUrl: string, closeAcpSessions: (agent: string) => Promise<void>) {
     const ctx = this.context = new EngineContext(cfg, store);
     this.diagnostics = new Diagnostics(ctx);
-    const doorbells = new Doorbells(
+    const doorbells = this.doorbells = new Doorbells(
       cfg,
       {
         store,
@@ -40,6 +41,13 @@ export class Engine {
         boundAt: (agent) => this.presence.get(agent)?.boundAt,
       },
       (agent) => !!this.presence.get(agent)?.waiting,
+      {
+        bridgeUrl,
+        polling: (agent) => this.presence.recentlyPolling(agent),
+        retry: (agent, ids) => this.postman.retryAcpMail(agent, ids),
+        failed: (agent, ids, error) => this.postman.doorbellResult(agent, ids, false, error, "acp"),
+        closeSessions: closeAcpSessions,
+      },
     );
     this.presence = new Presence(ctx, doorbells, {
       wakeWaiter: (agent) => this.postman.wakeWaiter(agent),

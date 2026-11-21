@@ -21,6 +21,7 @@ interface AgentPresence {
   // wait_for_mail (poll fallback) metrics, kept from M0
   waiting: boolean;
   waitCalls: number;
+  lastPollAt?: number;
   lastReturnAt?: number;
   maxGapMs: number;
   totalGapMs: number;
@@ -32,6 +33,7 @@ export class Presence {
   // Doorbell a client announced for its MCP session (the Claude proxy sends x-bridge-doorbell on every request),
   // so an identity recovered on any tool call gets its doorbell back, not only one recovered through join.
   private readonly sessionDoorbell = new Map<string, string>();
+  private readonly sessionAcpAgent = new Map<string, string>();
   /** Set by the HTTP layer: is this MCP session still open? */
   isSessionOpen: (sessionId: string) => boolean = () => true;
 
@@ -74,8 +76,20 @@ export class Presence {
   }
 
   /** The doorbell the agent should expect (decides what join and the tools tell it about waiting). */
-  doorbellKind(agent: string): DoorbellKind {
-    return this.doorbells.primary(agent).kind;
+  doorbellKind(agent: string, sessionId = this.get(agent)?.sessionId): DoorbellKind {
+    if (this.acpAgent(sessionId) === agent) return "acp";
+    const kind = this.doorbells.primary(agent).kind;
+    return kind === "acp" && sessionId ? "poll" : kind;
+  }
+
+  recentlyPolling(agent: string) {
+    const p = this.get(agent);
+    return !!p?.sessionId && this.isSessionOpen(p.sessionId) && !this.acpAgent(p.sessionId)
+      && (p.waiting || Date.now() - (p.lastPollAt ?? 0) < this.ctx.cfg.wait.stale_after_seconds * 1000);
+  }
+
+  acpAgent(sessionId: string | undefined) {
+    return sessionId ? this.sessionAcpAgent.get(sessionId) : undefined;
   }
 
   doorbellArmed(agent: string) {
@@ -101,8 +115,10 @@ export class Presence {
     const p = this.agents.get(agent);
     if (!p) return `未知 agent_id，可选：${this.agentIds().join(", ")}`;
     if (!p.sessionId) return `你还没有以 ${agent} 身份 join，请先调用 join。`;
-    if (p.sessionId !== sessionId)
+    if (p.sessionId !== sessionId) {
+      if (this.acpAgent(p.sessionId) === agent) return `身份 ${agent} 已被接管，后台会话正在处理协作桥的信。`;
       return `身份 ${agent} 已被另一个会话占用。请确认你的身份（可选：${this.agentIds().join(", ")}）；如果确实是你，用 join(agent_id, takeover=true) 接管。`;
+    }
     this.touch(agent);
     return null;
   }
@@ -111,14 +127,16 @@ export class Presence {
     if (p.sessionId !== sessionId) {
       p.boundAt = Date.now();
       p.client = undefined;
+      p.lastPollAt = undefined;
     }
     p.sessionId = sessionId;
     p.canRecover = false;
     this.touch(p.id);
   }
 
-  setSessionDoorbell(sessionId: string, hint: string | undefined) {
+  setSessionDoorbell(sessionId: string, hint: string | undefined, acpAgent?: string) {
     if (hint) this.sessionDoorbell.set(sessionId, hint);
+    if (acpAgent) this.sessionAcpAgent.set(sessionId, acpAgent);
   }
 
   private applyDoorbellHint(p: AgentPresence, hint: string | undefined) {
@@ -131,6 +149,7 @@ export class Presence {
   recoverBinding(agent: string, sessionId: string | undefined): boolean {
     const p = this.agents.get(agent);
     if (!sessionId || !p?.canRecover || p.sessionId) return false;
+    if (this.acpAgent(sessionId) && !this.doorbells.acp.connecting(agent)) return false;
     this.ctx.store.setResumeKey(agent);
     this.bind(p, sessionId);
     this.applyDoorbellHint(p, this.sessionDoorbell.get(sessionId));
@@ -143,6 +162,12 @@ export class Presence {
   join(agent: string, sessionId: string | undefined, takeover = false, doorbellHint?: string, recovery?: { key: string; replay: boolean }, client?: BridgeClient): Result {
     const p = this.agents.get(agent);
     if (!p) return err(`未知 agent_id，可选：${this.agentIds().join(", ")}`);
+    const acp = this.acpAgent(sessionId) === agent;
+    if (acp) {
+      if (!this.doorbells.acp.connecting(agent)) return err("后台会话已停止。");
+      if (this.recentlyPolling(agent)) return err("交互会话正在等信，本回合请结束。");
+      takeover = true;
+    }
     if (recovery?.replay && (!takeover || this.ctx.store.resumeKey(agent) !== recovery.key))
       return { error: `${agent} 的旧连接已失效，请重新调用 join。`, recovery_revoked: true };
     const st = this.status(agent);
@@ -152,7 +177,9 @@ export class Presence {
       const idleS = p.lastSeenAt ? Math.round((Date.now() - p.lastSeenAt) / 1000) : null;
       const releaseIn = idleS === null ? null : Math.max(0, this.ctx.cfg.wait.offline_after_seconds - idleS);
       return {
-        error: `身份 ${agent} 已被另一个会话占用。你很可能拿错了启动提示词，请确认自己的身份（可选：${this.agentIds().join(", ")}）。`,
+        error: this.acpAgent(p.sessionId) === agent
+          ? `身份 ${agent} 已被接管，后台会话正在处理协作桥的信。`
+          : `身份 ${agent} 已被另一个会话占用。你很可能拿错了启动提示词，请确认自己的身份（可选：${this.agentIds().join(", ")}）。`,
         bound_session: p.sessionId,
         bound_since: p.boundAt ? new Date(p.boundAt).toISOString() : null,
         bound_session_idle_seconds: idleS,
@@ -173,7 +200,7 @@ export class Presence {
     this.bind(p, sessionId);
     this.applyDoorbellHint(p, doorbellHint ?? (sessionId ? this.sessionDoorbell.get(sessionId) : undefined));
     if (client) p.client = { ...client, reportedAt: new Date().toISOString() };
-    const bell = this.doorbells.primary(agent);
+    const bell = this.doorbells.get(this.doorbellKind(agent, sessionId));
     const kind = bell.kind;
     this.ctx.log("join", { agent, session: sessionId, doorbell: kind, chain: this.doorbells.chain(agent), recovered: recovery?.replay || undefined });
     this.ctx.event(null, agent, "join", `${agent} ${recovery?.replay ? "重新连接" : "加入"}（门铃：${bell.label}）`);
@@ -200,6 +227,7 @@ export class Presence {
 
   sessionClosed(sessionId: string) {
     this.sessionDoorbell.delete(sessionId);
+    this.sessionAcpAgent.delete(sessionId);
     for (const p of this.agents.values())
       if (p.sessionId === sessionId) {
         p.sessionId = undefined;

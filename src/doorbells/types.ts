@@ -5,7 +5,7 @@
 // within the wake grace, falls through to the next one before asking the human.
 import type { Store } from "../store.js";
 
-export const DOORBELL_KINDS = ["claude-socket", "codex-queue", "codex-hook", "poll"] as const;
+export const DOORBELL_KINDS = ["claude-socket", "codex-queue", "codex-hook", "acp", "poll"] as const;
 export type DoorbellKind = (typeof DOORBELL_KINDS)[number];
 
 export interface Wake {

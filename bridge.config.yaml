@@ -3,9 +3,24 @@
 agents:
   claude: { product: claude-code, doorbell: auto }
   codex:  { product: codex, doorbell: auto }
-  # M3 之前没有门铃，只能轮询：join 时写明 agent_id，然后用 wait_for_mail 等信。
-  antigravity: { product: antigravity, doorbell: poll }
-  deepseek:    { product: deepseek-harness, doorbell: poll }
+  antigravity:
+    product: antigravity
+    doorbell: auto
+    acp:
+      command: '%LOCALAPPDATA%\agy\bin\agy.exe'
+      args: [acp, --disable-telemetry]
+      mcp: stdio
+      mode: accept-edits
+      permissions: allow
+  deepseek:
+    product: deepseek-harness
+    doorbell: auto
+    acp:
+      command: 'E:\Deepseek-Harness\DeepSeek Harness.exe'
+      args: [--expose-internals, 'E:\Deepseek-Harness\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh-desktop-host\lib\cli.js', --profile, acp, --patch, bridge.deepseek-acp.patch.yaml]
+      env: { ELECTRON_RUN_AS_NODE: '1' }
+      mcp: http
+      permissions: allow
 pipeline:
   - id: implement
     role: 编码

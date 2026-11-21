@@ -164,6 +164,7 @@ export class Workspace {
     const agents = this.presence.agentIds().map((id) => {
       const p = this.presence.get(id)!;
       const product = this.diagnostics.product(id, p.client);
+      const acp = this.doorbells.acp.snapshot(id);
       const doorbellStats = this.doorbells.stats(id);
       const failedWake = doorbellStats.find((stat) => stat.consecutiveFailures > 0);
       const status = this.presence.status(id);
@@ -188,7 +189,7 @@ export class Workspace {
           reason: "unanswered", agent: id, at: unanswered[0].created_at, title: `${id} 叫不醒，有 ${unanswered.length} 封信没取`,
           message: `${id} 叫不醒，有 ${unanswered.length} 封信没取（对话可能已关闭或断开）。请打开它的对话说一句「继续」。`,
         };
-      } else if (next && status === "never-joined") {
+      } else if (next && status === "never-joined" && (!acp || !this.doorbells.sessionless(id))) {
         delivery = {
           reason: status, agent: id, at: next.assigned_at, title: `${id} 有任务，等待加入`,
           message: `轮到 ${id}，但它还没有加入协作桥。请在 ${id} 里粘贴启动提示词。`,
@@ -213,17 +214,18 @@ export class Workspace {
         status,
         product,
         doorbellStats,
+        acp,
         diagnostics: diagnoses.filter((d) => d.agent === id || (d.agent === null && d.product === product?.id)),
         activity: activityFor({
           id, status, lastSeen: lastSeenAt,
           attempts: active, tasks, handoffs, template: this.ctx.cfg.task_template, delivery,
-          failedWake,
+          failedWake, acpActivity: acp?.activity,
           meeting: owesTurn ? {
             meeting: openMeeting, invitedAt: roundMail.find((m) => m.to_agent === id)?.created_at ?? (openMeeting.round === 1 ? openMeeting.created_at : null),
           } : undefined,
         }),
         doorbell: this.presence.doorbellKind(id),
-        doorbellLabel: this.doorbells.primary(id).label,
+        doorbellLabel: this.doorbells.get(this.presence.doorbellKind(id)).label,
         doorbellChain: this.doorbells.chain(id),
         doorbellArmed: this.presence.doorbellArmed(id),
         lastRingVia: p.lastRingKind ? this.doorbells.get(p.lastRingKind).label : null,

@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { smokeCli } from "./p2-cli-smoke.js";
+import { smokeAcp } from "./acp-smoke.js";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 7891);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -79,7 +80,7 @@ const versionProbes = () => fs.existsSync(fakeVersionLog) ? fs.readFileSync(fake
 let daemon: ChildProcess;
 async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<string, string> = {}) {
   daemon = spawn(process.execPath, ["--import", "tsx", "src/daemon.ts", "--project", project, "--port", String(PORT)], {
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: {
       ...process.env,
       // Panel snapshots can run git status while the fixture stages a file in the same repository.
@@ -100,9 +101,13 @@ async function startDaemon(project = proj, wakeGrace = "6", versionEnv: Record<s
 }
 async function stopDaemon() {
   if (!daemon || daemon.exitCode !== null || daemon.signalCode !== null) return;
-  const exited = new Promise((r) => daemon.once("exit", r));
-  daemon.kill();
+  const child = daemon;
+  const exited = new Promise((resolve) => child.once("exit", resolve));
+  const timeout = setTimeout(() => child.kill(), 10_000).unref();
+  if (child.connected) child.send("shutdown", (error) => { if (error) child.kill(); });
+  else child.kill();
   await exited;
+  clearTimeout(timeout);
 }
 
 async function connect(name: string, transport = new StreamableHTTPClientTransport(new URL(BASE + "/mcp"))) {
@@ -1396,6 +1401,10 @@ notify: { enabled: false }
   check(offlineJoin.isError === true && /ai-bridge start/.test(offlineJoin.content?.[0]?.text ?? ""),
     "a call while the daemon is down returns a tool error that says how to start the bridge");
   await warm.close();
+
+  await stopDaemon();
+  await smokeAcp({ root: ROOT, base: BASE, codexEnv: { BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
+    startDaemon, stopDaemon, api, state, call, check });
 } catch (e) {
   console.error(e);
   failed = true;

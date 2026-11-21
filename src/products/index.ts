@@ -1,8 +1,9 @@
 import { claude } from "./claude.js";
 import { codex } from "./codex.js";
+import { antigravity, deepseekHarness } from "./acp.js";
 import type { BridgeClient, ProductProfile } from "./types.js";
 
-export const products: readonly ProductProfile[] = [claude, codex];
+export const products: readonly ProductProfile[] = [claude, codex, antigravity, deepseekHarness];
 
 export function productById(id?: string) {
   return products.find((p) => id && p.ids.includes(id));

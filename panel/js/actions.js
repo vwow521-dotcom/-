@@ -9,6 +9,8 @@ const endpoints = {
   cancelMeeting: (id) => meeting(id, "cancel"),
   answer: (id) => "/api/questions/" + id + "/answer",
   release: (id) => "/api/agents/" + encodeURIComponent(id) + "/release",
+  restartAcp: (id) => "/api/agents/" + encodeURIComponent(id) + "/acp/restart",
+  stopAcp: (id) => "/api/agents/" + encodeURIComponent(id) + "/acp/stop",
   startRun: () => "/api/runs",
   startMeeting: () => "/api/meetings",
   stopRun: () => "/api/runs/stop",
@@ -16,6 +18,7 @@ const endpoints = {
 
 const confirmations = {
   release: (id) => "释放 " + id + " 的身份？新会话可以重新加入，原会话会失去绑定。",
+  stopAcp: (id) => "停止 " + id + " 的后台进程？正在进行的后台回合会被取消。",
   stopRun: () => "停止当前任务？进行中的阶段会被取消。",
   cancelMeeting: () => "取消当前会议？本轮未处理的邀请会作废。",
 };

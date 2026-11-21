@@ -187,8 +187,9 @@ export class Scheduler {
     for (const a of this.ctx.store.attempts(run.id))
       if (["ready", "in_progress", "awaiting_approval"].includes(a.status)) {
         this.ctx.store.updateAttempt(a.id, { status: "cancelled", ended_at: new Date().toISOString() });
-        const open = this.ctx.store.taskMailFor(a.id).filter((m) => (LIVE_MAIL as readonly string[]).includes(m.status));
-        this.ctx.store.setMailStatus(open.map((m) => m.id), "void");
+        const mails = this.ctx.store.taskMailFor(a.id);
+        this.postman.voidMails(mails.filter((m) => [...LIVE_MAIL, "fetched"].some((s) => s === m.status)).map((m) => m.id));
+        this.postman.cancelAcpMail(mails.filter((m) => m.status === "acked").map((m) => m.id));
       }
     for (const t of this.ctx.store.tasks(run.id)) if (t.status === "pending" || t.status === "active") this.ctx.store.setTaskStatus(t.id, "cancelled");
     this.ctx.store.releaseLeasesOfRun(run.id);
@@ -418,6 +419,7 @@ export class Scheduler {
         trimmed ? { kind: "approval_note", from_stage: stage.id, user_requirements: [trimmed], blocking: [], observations: [] } : null,
       );
     } else {
+      this.postman.cancelAcpMail(this.ctx.store.taskMailFor(a.id).map((m) => m.id));
       const target = this.stageOf(task, stage.on_reject ?? stage.id);
       const comments = h?.data.review_comments ?? [];
       const rejected = h?.data.verdict === "reject";

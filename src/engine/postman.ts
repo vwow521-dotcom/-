@@ -22,6 +22,7 @@ export class Postman {
   // In-process parked-hook delivery and its scheduled verification share the same mail ID array.
   private readonly verifications = new WeakMap<string[], { counted: boolean; disconnected: boolean }>();
   private readonly deferredWakes = new Map<string, string[]>();
+  shuttingDown = false;
 
   constructor(
     private readonly ctx: EngineContext,
@@ -91,7 +92,7 @@ export class Postman {
   }
 
   /** The proxy reports whether writing to the Claude messaging socket worked. */
-  doorbellResult(agent: string, mailIds: string[], ok: boolean, error?: string, kind: "claude-socket" | "codex-hook" = "claude-socket") {
+  doorbellResult(agent: string, mailIds: string[], ok: boolean, error?: string, kind: "claude-socket" | "codex-hook" | "acp" = "claude-socket") {
     const p = this.presence.get(agent)!;
     const bell = this.doorbells.get(kind);
     if (ok) {
@@ -105,6 +106,7 @@ export class Postman {
       verification.disconnected = true;
       if (!verification.counted) this.doorbells.recordRing(agent, bell);
     }
+    this.releaseDeferredWake(mailIds);
     this.ringFailed(agent, bell, mailIds, error ?? "未知原因", new Set([kind]));
   }
 
@@ -138,6 +140,7 @@ export class Postman {
    * successful one is checked for a sign of life after its grace period.
    */
   kick(agent: string, tried: ReadonlySet<DoorbellKind> = new Set()) {
+    if (this.shuttingDown) return;
     const queued = this.ctx.store.mailByStatus(agent, ["queued"]);
     if (!queued.length) return;
     const mw = this.mailWakers.get(agent);
@@ -188,6 +191,22 @@ export class Postman {
         this.releaseDeferredWake(ids);
         this.ringFailed(agent, bell, ids, o.error, nowTried, o.cooldown);
       });
+  }
+
+  retryAcpMail(agent: string, ids?: string[]) {
+    const statuses = ids ? ["rung"] as const : ["rung", "stuck"] as const;
+    const unread = this.ctx.store.mailByStatus(agent, [...statuses]).filter((mail) => !ids || ids.includes(mail.id));
+    this.ctx.store.setMailStatus(unread.map((mail) => mail.id), "queued");
+    this.kick(agent);
+  }
+
+  voidMails(ids: string[]) {
+    this.ctx.store.setMailStatus(ids, "void");
+    this.cancelAcpMail(ids);
+  }
+
+  cancelAcpMail(ids: string[]) {
+    if (ids.length) this.doorbells.acp.voided(ids);
   }
 
   private releaseDeferredWake(ids: string[]) {
@@ -248,6 +267,7 @@ export class Postman {
 
   /** Periodic: re-ring mail nobody fetched, give up after max_rings, flag overdue acks, retry lease-blocked tasks. */
   private sweep() {
+    if (this.shuttingDown) return;
     const now = Date.now();
     const { ring_retry_seconds, max_rings, ack_timeout_seconds } = this.ctx.cfg.mail;
     for (const id of this.wakeAlerts) {
@@ -272,6 +292,10 @@ export class Postman {
     }
     // No doorbell can reach the agent right now (its conversation was closed, its proxy is gone) → tell the human early.
     const unreachable = new Map<string, string[]>();
+    // A recent interactive poll can temporarily suppress an ACP wake without setting a retry timer.
+    for (const agent of new Set(this.ctx.store.allMailByStatus(["queued"]).map((mail) => mail.to_agent))) {
+      if (this.doorbells.pick(agent)?.kind === "acp") this.kick(agent);
+    }
     for (const m of this.ctx.store.allMailByStatus(["queued"])) {
       if (now - Date.parse(m.created_at) < UNREACHABLE_ALERT_MS || this.wakeAlerts.has(m.id)) continue;
       const st = this.presence.status(m.to_agent);
@@ -321,7 +345,7 @@ export class Postman {
       if (m.kind === "task") {
         const task = this.payloads.task(m);
         if (!task) {
-          this.ctx.store.setMailStatus([m.id], "void");
+          this.voidMails([m.id]);
           out.push({ ...this.mailView(m), void: true, note: "这个任务已停止或已被替换，忽略即可。" });
           continue;
         }
@@ -329,7 +353,7 @@ export class Postman {
       } else if (m.kind === "meeting") {
         const meeting = this.payloads.meeting(m);
         if (!meeting) {
-          this.ctx.store.setMailStatus([m.id], "void");
+          this.voidMails([m.id]);
           out.push({ ...this.mailView(m), void: true, note: "这一轮会议已经结束或被取消，忽略即可。" });
           continue;
         }
@@ -337,7 +361,7 @@ export class Postman {
       } else if (m.kind === "chat") {
         const chat = this.payloads.chat(m);
         if (!chat) {
-          this.ctx.store.setMailStatus([m.id], "void");
+          this.voidMails([m.id]);
           continue;
         }
         out.push({ ...this.mailView(m), chat });
@@ -347,6 +371,7 @@ export class Postman {
       this.ctx.store.setMailStatus([m.id], "fetched");
       if (m.rung_at) this.ctx.log("rung_mail_fetched", { id: m.id, agent, sinceRingMs: Date.now() - Date.parse(m.rung_at) });
     }
+    if (this.presence.acpAgent(sessionId) === agent) this.doorbells.acp.fetched(agent, out.filter((mail) => !mail.void).map((mail) => String(mail.id)));
     this.ctx.onChange();
     const kind = this.presence.doorbellKind(agent);
     return {
@@ -375,7 +400,9 @@ export class Postman {
     const be = this.presence.bindingError(agent, sessionId);
     if (be) return err(be);
     const p = this.presence.get(agent)!;
+    if (this.presence.acpAgent(sessionId) === agent) return err("后台会话处理完后直接结束本回合，有新信时会由 ACP 唤醒。");
     const started = Date.now();
+    p.lastPollAt = started;
     p.waitCalls++;
     const gap = p.lastReturnAt ? started - p.lastReturnAt : undefined;
     if (gap !== undefined) {

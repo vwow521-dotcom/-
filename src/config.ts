@@ -17,6 +17,16 @@ const StageSchema = z.object({
   owns: z.array(z.string()).optional(),
 });
 
+const AcpSchema = z.object({
+  command: z.string().trim().min(1).optional(),
+  args: z.array(z.string()).optional(),
+  cwd: z.string().trim().min(1).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+  mcp: z.enum(["stdio", "http"]).optional(),
+  mode: z.string().trim().min(1).optional(),
+  permissions: z.enum(["allow", "deny"]).default("deny"),
+});
+
 const DEFAULT_TASK_TEMPLATE = [
   {
     id: "implement",
@@ -47,6 +57,7 @@ const ConfigSchema = z
           // kind, or auto = the product's default chain (src/products/); for an
           // unknown product, whatever the client registers.
           doorbell: z.union([z.literal("auto"), z.enum(DOORBELL_KINDS), z.array(z.enum(DOORBELL_KINDS)).min(1)]).default("auto"),
+          acp: AcpSchema.optional(),
         })
         .default({ doorbell: "auto" }),
     ),
@@ -123,11 +134,26 @@ const ConfigSchema = z
   });
 
 export type Stage = z.infer<typeof StageSchema>;
+export type AcpConfig = z.infer<typeof AcpSchema>;
 export type Config = z.infer<typeof ConfigSchema> & { projectDir: string; source: string };
 
 export const DEFAULT_CONFIG_YAML = `agents:
   claude: { product: claude-code, doorbell: auto }
   codex:  { product: codex, doorbell: auto }
+  # 后台成员按需启用：
+  # antigravity:
+  #   product: antigravity
+  #   doorbell: auto
+  #   acp: { mcp: stdio, mode: accept-edits, permissions: deny }
+  # deepseek:
+  #   product: deepseek-harness
+  #   doorbell: auto
+  #   acp:
+  #     command: '%DSH_INSTALL_DIR%\\DeepSeek Harness.exe'
+  #     args: [--expose-internals, '%DSH_INSTALL_DIR%\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js', --profile, acp]
+  #     env: { ELECTRON_RUN_AS_NODE: '1' }
+  #     mcp: http
+  #     permissions: deny
 pipeline:
   - id: plan
     role: 规划/架构
