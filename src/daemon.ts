@@ -17,6 +17,7 @@ import type { BridgeClient } from "./products/types.js";
 import { isRepo, dirtyFiles, show } from "./git.js";
 import { PANEL_HTML } from "./panel.js";
 import { toast } from "./notify.js";
+import { configureAcpLedger, sweepAcpOrphans } from "./doorbells/acp-process.js";
 
 function arg(name: string) {
   const i = process.argv.indexOf(`--${name}`);
@@ -299,6 +300,17 @@ const engine = new Engine(cfg, new Store(projectDir), bridgeUrl, async (agent) =
   await Promise.allSettled(owned.map(([, transport]) => transport.close()));
 });
 engine.presence.isSessionOpen = (id) => transports.has(id);
+// Windows: end ACP agents a previous daemon left behind (crash, force kill), before anything can spawn new ones.
+// This is synchronous so no timer or request runs first; it costs one PowerShell query, and only when the
+// ledger has entries.
+configureAcpLedger(path.join(projectDir, ".bridge", "acp-hosts.json"), projectDir);
+for (const r of sweepAcpOrphans()) {
+  const role = { supervisor: "监督进程", agent: "代理进程", entry: "台账记录" }[r.role];
+  engine.context.log(r.kind, { agent: r.agent, role: r.role, pid: r.pid, reason: r.reason });
+  engine.context.event(null, r.agent, r.kind, r.kind === "acp_orphan_killed"
+    ? `${r.agent} · 结束了上次遗留的${role}（PID ${r.pid}）`
+    : `${r.agent} · 未清理${role}（PID ${r.pid}）：${r.reason}`);
+}
 engine.context.notifyHuman = (title, body) => {
   if (cfg.notify.enabled) toast(title, body, `http://127.0.0.1:${port}/`);
 };

@@ -2,6 +2,7 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { AcpCommand } from "./acp-command.js";
+import { recordAcpProcess, supervised, supervisorSpawn } from "./acp-process.js";
 
 type Id = string | number;
 type Json = Record<string, unknown>;
@@ -32,15 +33,38 @@ export class AcpRpc {
   private exit?: Error;
   private readonly exited: Promise<void>;
   private killing?: Promise<void>;
+  private agentPid?: number;
+  private unrecord?: () => void;
+  private spawnError?: string;
+  private announce?: () => void;
 
   constructor(command: AcpCommand, callbacks?: {
     update(params: Json): void;
     permission(params: Json): unknown;
     exit(error: Error, code: number | null): void;
   }) {
-    this.child = spawn(command.command, command.args, {
-      cwd: command.cwd, env: command.env, stdio: "pipe", windowsHide: true, detached: process.platform !== "win32",
-    });
+    this.ready = new Promise((resolve) => { this.announce = resolve; });
+    if (supervised) {
+      // Windows: the supervisor is the agent's parent and ends its whole tree if this process dies (acp-process.ts).
+      const host = supervisorSpawn(command.command, command.args);
+      this.child = spawn(host.command, host.args, {
+        cwd: command.cwd, env: command.env, windowsHide: true, ...host.options,
+      }) as unknown as ChildProcessWithoutNullStreams;
+      this.child.on("message", (message: { type?: string; pid?: number; message?: string }) => {
+        if (message?.type === "agent" && Number.isInteger(message.pid) && !this.agentPid) {
+          this.agentPid = message.pid;
+          this.unrecord = recordAcpProcess(command.env.BRIDGE_AGENT_ID ?? "probe", command.command, this.child.pid!, message.pid!);
+          this.announce?.();
+        } else if (message?.type === "error") this.spawnError = shortText(message.message);
+      });
+      // The IPC channel must not keep a short-lived owner (doctor --probe) alive.
+      this.child.channel?.unref();
+    } else {
+      this.child = spawn(command.command, command.args, {
+        cwd: command.cwd, env: command.env, stdio: "pipe", windowsHide: true, detached: true,
+      });
+      this.announce?.();
+    }
     this.child.stderr.resume();
     const reader = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     reader.on("line", (line) => this.receive(line, callbacks));
@@ -54,17 +78,25 @@ export class AcpRpc {
         }
         this.pending.clear();
         reader.close();
+        this.unrecord?.();
+        this.announce?.();
         resolve();
         callbacks?.exit(error, code);
       };
       this.child.once("error", (error) => end(error, null));
-      this.child.once("exit", (code, signal) => end(new Error(`ACP 进程已退出（${code ?? signal}）`), code));
+      this.child.once("exit", (code, signal) => end(new Error(this.spawnError ? `ACP 进程无法启动：${this.spawnError}`
+        : `ACP 进程已退出（${code ?? signal}）`), code));
       // An exit or a failed write rejects its request. Never let EPIPE become an unhandled stream error.
       this.child.stdin.on("error", () => {});
     });
   }
 
-  get pid() { return this.child.pid; }
+  /** The agent's own PID. On Windows it arrives from the supervisor a few milliseconds after spawn. */
+  get pid() { return supervised ? this.agentPid : this.child.pid; }
+  /** The Windows supervisor (bin/acp-supervisor.mjs), the root of the agent's process tree. */
+  get hostPid() { return supervised ? this.child.pid : undefined; }
+  /** Resolves once pid is known (at once off Windows), or when the process exits first. */
+  readonly ready: Promise<void>;
   get alive() { return !this.exit; }
 
   async initialize(version: string) {
@@ -103,7 +135,8 @@ export class AcpRpc {
   }
 
   private async killTree() {
-    const pid = this.pid;
+    // The tree's root: the supervisor on Windows (its child is the agent), the agent's process group elsewhere.
+    const pid = this.child.pid;
     if (!pid) return this.exited;
     if (process.platform === "win32") {
       if (this.alive) await new Promise<void>((resolve) => {
