@@ -368,13 +368,24 @@ Codex 全程靠队列门铃，没有出问题。Claude 掉了三次，每次都�
   - `events` 新增可空列 `meeting_id`。会议事件由 `ctx.event(…, meeting_id)` 显式写入。旧库首次打开时按桥历来的事件模板（以「会议 #N 」「你打回了/你批准了会议 #N 」开头，或以该行 agent 加「 在会议 #N 」开头，成员名可含空格）回填一次，模板以外的文字和不存在的会议编号留空。加列和回填在同一个事务里，中途失败会整体回滚，下次启动重来。索引：`events(run_id, created_at)`、`events(meeting_id, created_at)`、`handoffs(run_id)`、`attempts(run_id)`、`meeting_turns(meeting_id)`。文件夹列表按每个运行和会议走索引取最近活动，不再每次聚合全部历史；文件夹事件用 `run_id = ? OR meeting_id = ?`。0.9.0 用文本拼接 `'会议 #' || ?` 匹配会议事件，JS 数字绑定成 REAL 后变成 `#1.0`，没有运行的会议文件夹因此一条事件也显示不出来；改用列以后这个问题一并消失。
   - 纪要短标题里数字之间的点不算标点，`收尾 0.9.0 的问题` 得到 `收尾-0.9.0-的问题`。
 
-## 23. M3：ACP 后台成员（0.10.0）
+## 23. M3：ACP 后台成员（0.10.0，0.10.1 收尾）
 
 - **连接与唤醒**。`agents.<id>.acp` 配置子进程、工作目录、MCP 传输和权限。首次有信时启动，依次执行 `initialize`、建会话及可选的 `session/set_mode`。Antigravity 的 stdio 代理以 `bridge_acp` 注册，避开交互配置中已经加载的 `bridge`。DeepSeek Harness 以 HTTP MCP 直接连接。子进程环境过滤 `CLAUDE_CODE_*` 和桥的其他门铃变量。提示里的工作内容仍然从 MCP 收件箱取得。 [ACP 会话规范](https://agentclientprotocol.com/protocol/v1/session-setup) · [Antigravity MCP 配置](https://antigravity.google/docs/cli-settings)
 - **复用与补投**。`agent_endpoints` 以 `acp-session` 保存每个成员的会话 ID。重启进程后按能力尝试 `resume`、`load`，再新建。DeepSeek Harness 的 MCP 插件在守护进程断线后不会自动重连，因此 HTTP 成员跨守护进程重启一律新建会话。每个成员同时只有一个 `session/prompt`。本轮结束时检查没取走的信，每封信至多立即补发一次，后续沿用邮局的重投间隔。
 - **交互优先**。阻塞中的 `wait_for_mail` 先取信，最近一次轮询在 `wait.stale_after_seconds` 内也会暂缓 ACP。后台 MCP 以 `x-bridge-agent` 和 `x-bridge-doorbell: acp` 登记身份，桥为它的 `join` 补接管参数。被接管的前台会话会收到「后台会话正在处理协作桥的信」。后台回合领完信后直接结束。
-- **取消、退避和退出**。停止运行、任务被打回替换或信件作废时，对涉及这封信的活动回合发 `session/cancel`。进程或协议失败后，两次自动重试分别等待 30 秒和 2 分钟。第三次失败后等待手动重启，门铃链降级仍使用全局的 `doorbells.cooldown_seconds`（默认 10 分钟）。停止后台或协作桥退出时先取消正在执行的回合，再按能力发 `session/close`，之后结束进程树。Windows 使用 `taskkill /T /F`。 [ACP 取消规范](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation)
+- **取消**（0.10.1）。停止运行、任务被打回替换或信件作废时，对涉及这封信的活动回合发 `session/cancel`，宽限固定为 30 秒（`BRIDGE_ACP_CANCEL_GRACE_SECONDS` 可调），不随代理输出延长。宽限内收到原 prompt 的 `cancelled` 就正常收尾，进程和会话都保留。超时记 `acp_cancel_timeout`，结束进程树，把取走未确认的信退回；这不计失败、不进入退避，原有失败次数不变，下一封有效信懒启动并恢复原会话。每次取消以 `acp_cancel_end` 记下从发出到收尾的耗时（`elapsedMs`）。取消期间该成员的 `fetch_inbox` 返回空、`reserve_paths` 被拒绝，新信留在队列里不消耗响铃次数，回合结束后补投一次，同一会话不会重叠两个 prompt。
+- **取消期间的租约保护**（0.10.1）。停止运行或驳回替换时，如果该任务的 ACP 回合还没结束（或它的交接还在做 git 提交），任务的租约保留到回合结束或进程树退出。期间调度器不启动路径与之重叠的任务；没有 `paths` 的任务（可以写整个项目）一律等待；不重叠的任务照常开始。保护只在内存里，守护进程重启时会释放已停止运行的租约。停止之后才到达的交接不再自动提交，改动留在工作区。
+- **退避**。进程或协议失败后，两次自动重试分别等待 30 秒和 2 分钟，第三次失败后停止，等手动重启。重试时机只由 ACP 宿主自己的计时器决定，同一次故障只有一个计时器；门铃的通用冷却（`doorbells.cooldown_seconds`，默认 10 分钟）只用于判断唤醒是否健康，ACP 的响铃失败不触发它。停止后台或协作桥退出时先取消正在执行的回合，再按能力发 `session/close`，之后结束进程树。 [ACP 取消规范](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation)
+- **Windows 进程归属**（0.10.1）。实测：Node（libuv）把非 detached 的子进程放进「关闭即结束」的 Job Object，并允许子进程派生的进程静默脱离。所以守护进程被强制结束时，它直接拉起的代理会被系统立即结束，而非 Node 代理（agy）派生的进程会活下来，此时 `taskkill /T` 已经找不到它们。因此：
+  - **监督进程** `bin/acp-supervisor.mjs`：守护进程以 detached 方式启动它，再由它拉起代理。它持有代理的 stdin、stdout、stderr，原样复制字节，不改 ACP 报文；守护进程一侧的 EOF 不转给代理。IPC 断开、stdin EOF 或信号到来时（每秒检查守护进程 PID 只作辅助），先对还活着的代理执行 `taskkill /T /F`，连同它派生的进程一起结束。代理正常退出时，监督进程把输出全部复制完再以代理的退出码退出。`AcpRpc.pid` 仍是代理的 PID，`hostPid` 是监督进程；`doctor --probe` 也经过监督进程，但不写台账。
+  - **台账** `<项目>/.bridge/acp-hosts.json`：拿到代理 PID 后立即写一条记录，再补齐守护进程、监督进程、代理三项的精确创建时间（PowerShell CIM，约 0.5 到 1.5 秒），从磁盘读回核对一致后才放行 ACP 报文。写入或身份记录失败时 `initialize` 被拒绝，按启动失败进入退避。代理正常退出时删除记录。
+  - **启动清理**：端口绑定后、第一次投递 ACP 前同步执行，台账为空时不调用 PowerShell。只有记录写明了本项目的绝对路径、原守护进程已证实退出（PID 不在，或已归别的进程）时才处理。每次 `taskkill` 前都重新查询目标，PID 和精确创建时间一致（监督进程还要核对命令行含 `acp-supervisor.mjs`）才结束；结束后再查一次，只有确认已不在或 PID 已归别的进程才记 `acp_orphan_killed`。查询失败、身份无法核实、结束未确认的记录都记 `acp_orphan_skipped` 并保留到下次启动。
 - **观察与体检**。成员详情显示后台状态、下次重试、最近 50 行代理输出和最近权限决定。代理输出只在内存里保留。启动、初始化、新建或恢复、响铃、结束、权限、退出及取消都有 `acp_*` 事件。工具调用还记录短标题和状态。`doctor --probe --project <目录>` 对每个后台成员只执行 `initialize`。本机探针确认 Antigravity ACP Server 1.5.13 支持恢复、加载和关闭，DeepSeek Harness 0.2.2-rc.5 内置的 ACP 0.0.1 支持 HTTP MCP、恢复和关闭。
-- **成员分工**。Antigravity 和 DeepSeek Harness 适合文档、文案、纪要和第二意见。重编码和最终审查继续交给 Codex、Claude。两种产品已有 ACP，剪贴板成员适配暂缓。
+- **成员分工**。Antigravity 和 DeepSeek Harness 适合文档、文案、纪要和第二意见。重编码和最终审查继续交给 Codex、Claude。两种产品已有 ACP，剪贴板成员适配暂缓。0.10.1 起可在 `agents.<id>.notes` 写分工说明（去掉首尾空格，不超过 200 字）：提案轮和定稿轮的会议信带 `members: [{id, product, notes}]`，列出配置里的全部成员（包括没参会的），定稿说明提示「分配负责人时参考 members[].notes」；`/api/state` 的 `agents[].notes` 和办公室成员详情也显示它。notes 只供参考，不参与调度和 `validatePlan`。
 - **真实演示**。在 7879 的临时 Git 项目中，Antigravity 新建会话 5.157 秒，实现回合 43.391 秒，提交 `9893e93`。DeepSeek 新建会话 1.141 秒，审查回合 15.411 秒，提交 `7a6ed82`，流程进入人工审批。随后 `@deepseek` 的聊天回合 3.106 秒，复用了审查的会话。两个后台进程经面板停止并查到 PID 已退出。DeepSeek 自带 `acp` profile 默认用需要 API Key 的 `deepseek-official`。本仓库向该进程传入 `--patch bridge.deepseek-acp.patch.yaml` 来使用桌面已登录的 `deepseek-account` 路由。 [DeepSeek 账号模型](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#deepseek-account-models)
+- **已知限制**。
+  - 代理的根进程自己先退出时，它在 Node Job 之外派生的进程会继续运行，`taskkill /T` 已经找不到它们。监督进程管不到这种情况，只有 Job Object（不脱离的作业）能解决；Node 没有相应 API，需要原生模块或 C# 辅助进程，暂未做。
+  - 只结束监督进程（例如在任务管理器里）时，代理在监督进程的 Job 里会被一起结束，但它派生的、脱离了 Job 的进程不在台账里，下次启动也不会清理。
+  - Windows 上 `acp_spawn` 事件在代理 PID 报上来之前发出，显示「PID 未知」；成员详情随后显示真实 PID。
+  - DeepSeek Harness 的 MCP 插件断线后不会自动重连（见上文「复用与补投」）。
 

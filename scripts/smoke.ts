@@ -19,6 +19,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { smokeCli } from "./p2-cli-smoke.js";
 import { smokeAcp } from "./acp-smoke.js";
+import { smokeAcpProcess } from "./acp-process-smoke.js";
+import { smokeMemberNotes } from "./member-notes-smoke.js";
 
 const PORT = Number(process.env.SMOKE_PORT ?? 7891);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -1405,6 +1407,12 @@ notify: { enabled: false }
   await stopDaemon();
   await smokeAcp({ root: ROOT, base: BASE, codexEnv: { BRIDGE_CODEX_BIN: fakeCodex, CODEX_HOME: codexHome },
     startDaemon, stopDaemon, api, state, call, check });
+
+  await stopDaemon();
+  await smokeMemberNotes({ base: BASE, startDaemon, stopDaemon, api, call, check });
+  // Runs its own daemons on the same port, so the fixture daemon must be stopped first.
+  await stopDaemon();
+  await smokeAcpProcess({ root: ROOT, port: PORT, check });
 } catch (e) {
   console.error(e);
   failed = true;
