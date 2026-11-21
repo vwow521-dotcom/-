@@ -233,27 +233,46 @@ export function sweepAcpOrphans(deps: { query?: ProcessQuery; kill?: TreeKill } 
     for (const e of entries) report("acp_orphan_skipped", e, "entry", e.agentProc?.pid ?? 0, "无法查询进程，保留记录待下次启动");
     return reports;
   }
-  let live: Map<number, ProcessInfo> = first;
+  // `first` only decides which daemons are gone and which PIDs are worth a look. It can be stale by the time a
+  // later entry is handled, so every taskkill is preceded by a fresh query of its own target.
+  const live = first;
   const keep: LedgerEntry[] = [];
 
-  /** End one verified process tree, then confirm with a fresh query. Returns false when it may still be running. */
-  const end = (e: LedgerEntry, role: "supervisor" | "agent", owned: Owned, reason: string) => {
+  /**
+   * End one process tree. Right before taskkill, a fresh query must show the same PID with the exact recorded
+   * creation time (and, for the supervisor, acp-supervisor.mjs in its command line); afterwards a second query
+   * must show it gone or replaced. "absent": nothing of ours is running. "pending": unconfirmed, keep the entry.
+   */
+  const end = (e: LedgerEntry, role: "supervisor" | "agent", owned: Owned, reason: string): "ended" | "absent" | "pending" => {
+    const before = query([owned.pid]);
+    if (!before) {
+      report("acp_orphan_skipped", e, role, owned.pid, "结束前无法核实身份，保留记录");
+      return "pending";
+    }
+    const state = identify(owned, before);
+    if (state === "gone") return "absent";
+    if (state === "other" || (state === "match" && role === "supervisor" && !before.get(owned.pid)!.cmd.includes(SUPERVISOR_NAME))) {
+      report("acp_orphan_skipped", e, role, owned.pid, "PID 已被其他进程使用");
+      return "absent";
+    }
+    if (state === "unknown") {
+      report("acp_orphan_skipped", e, role, owned.pid, owned.created ? "身份无法核实，保留记录" : "没有记录到创建时间，保留记录");
+      return "pending";
+    }
     kill(owned.pid);
-    const checked = [...new Set([owned.pid, e.agentProc.pid])];
-    const after = query(checked);
+    const after = query([owned.pid]);
     if (!after) {
       report("acp_orphan_skipped", e, role, owned.pid, "结束后无法复核，保留记录");
-      return false;
+      return "pending";
     }
-    live = new Map([...[...live].filter(([pid]) => !checked.includes(pid)), ...after]);
     // Only "gone" or "other" proves the end. A PID still listed whose creation time cannot be read is unconfirmed.
-    const now = identify(owned, live);
+    const now = identify(owned, after);
     if (now === "match" || now === "unknown") {
       report("acp_orphan_skipped", e, role, owned.pid, now === "match" ? "结束失败，保留记录" : "结束后身份无法核实，保留记录");
-      return false;
+      return "pending";
     }
     report("acp_orphan_killed", e, role, owned.pid, reason);
-    return true;
+    return "ended";
   };
 
   for (const e of entries) {
@@ -271,33 +290,15 @@ export function sweepAcpOrphans(deps: { query?: ProcessQuery; kill?: TreeKill } 
       keep.push(e);
       continue;
     }
-    let pending = false;
-    if (e.supervisor) {
-      const state = identify(e.supervisor, live);
-      if (state === "unknown") {
-        report("acp_orphan_skipped", e, "supervisor", e.supervisor.pid, "身份无法核实，保留记录");
-        pending = true;
-      } else if (state === "other" || (state === "match" && !live.get(e.supervisor.pid)!.cmd.includes(SUPERVISOR_NAME))) {
-        report("acp_orphan_skipped", e, "supervisor", e.supervisor.pid, "PID 已被其他进程使用");
-      } else if (state === "match" && !end(e, "supervisor", e.supervisor, "监督进程身份核验通过")) {
-        // The supervisor's end was not confirmed (or the re-check failed, so `live` may be stale): leave the agent
-        // for the next start rather than act on an old snapshot.
-        report("acp_orphan_skipped", e, "agent", e.agentProc.pid, "监督进程未确认结束，代理留待下次核验");
-        keep.push(e);
-        continue;
-      }
+    // A PID that was not running at the start cannot be ours later (a new process would have a new creation time).
+    if (e.supervisor && identify(e.supervisor, live) !== "gone"
+      && end(e, "supervisor", e.supervisor, "监督进程身份核验通过") === "pending") {
+      // Not confirmed: leave the agent for the next start rather than act on what is known now.
+      report("acp_orphan_skipped", e, "agent", e.agentProc.pid, "监督进程未确认结束，代理留待下次核验");
+      keep.push(e);
+      continue;
     }
-    // `live` holds the fresh answer after the supervisor's tree was ended, so a gone agent is not ended twice.
-    const state = identify(e.agentProc, live);
-    if (state === "unknown") {
-      report("acp_orphan_skipped", e, "agent", e.agentProc.pid, e.agentProc.created ? "身份无法核实，保留记录" : "没有记录到创建时间，保留记录");
-      pending = true;
-    } else if (state === "other") {
-      report("acp_orphan_skipped", e, "agent", e.agentProc.pid, "PID 已被其他进程使用");
-    } else if (state === "match" && !end(e, "agent", e.agentProc, "代理身份核验通过")) {
-      pending = true;
-    }
-    if (pending) keep.push(e);
+    if (identify(e.agentProc, live) !== "gone" && end(e, "agent", e.agentProc, "代理身份核验通过") === "pending") keep.push(e);
   }
   writeLedger(keep);
   return reports;

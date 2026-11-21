@@ -97,7 +97,21 @@ function sweepDecisions(check: Options["check"]) {
   check(r.kept.length === 1 && r.kills.join() === "20" && !r.reports.some((x) => x.kind === "acp_orphan_killed"),
     "sweep: a supervisor whose identity cannot be read after taskkill is not counted as ended, and its agent is left alone");
   r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]), undefined, 1);
+  check(r.kept.length === 1 && !r.kills.length, "sweep: when the check right before taskkill fails, nothing is ended and the entry is kept");
+  r = run([entry()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]), undefined, 2);
   check(r.kept.length === 1 && r.kills.join() === "20", "sweep: when the re-check after ending the supervisor fails, the agent is not ended from the old snapshot");
+  // Two entries: while the first is handled, the second entry's agent PID is reused by an unrelated process.
+  const second = () => entry({ agent: "v", daemon: { pid: 11, created: t(1) }, supervisor: null, agentProc: { pid: 40, created: t(4) } });
+  const reuse40 = (pid: number, w: Map<number, ProcessInfo>) => {
+    w.delete(pid);
+    if (pid === 20) { w.delete(30); w.set(40, { pid: 40, created: t(8), cmd: "unrelated.exe" }); }
+  };
+  r = run([entry(), second()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3)), proc(40, t(4))]), reuse40);
+  check(r.kills.join() === "20" && r.kept.length === 0,
+    "sweep: a later entry's PID reused while an earlier entry is handled is re-checked and not ended");
+  r = run([entry(), second()], new Map([proc(20, t(2), supervisorCmd), proc(30, t(3)), proc(40, t(4))]), reuse40, 2);
+  check(r.kills.join() === "20" && r.kept.length === 2,
+    "sweep: after a failed re-check, a later entry is not ended from the stale snapshot either");
   r = run([entry({ project: undefined as unknown as string }), entry({ project: "relative" }), entry({ project: dir + "-other" })],
     new Map([proc(20, t(2), supervisorCmd), proc(30, t(3))]));
   check(r.kept.length === 3 && !r.kills.length, "sweep: entries without an explicit, absolute, matching project directory are only reported");
