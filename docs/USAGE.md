@@ -175,7 +175,10 @@ agents:
 ```
 
 - **启动**。Antigravity 默认找 `%LOCALAPPDATA%\agy\bin\agy.exe`，也会从 PATH 查找 `agy.exe`。DeepSeek Harness 请填写 exe 和 ACP 参数。桥展开命令和参数中的 `%变量名%`，默认在项目目录启动。配置 `acp.cwd` 可以指定另一个工作目录。
-- **权限**。`permissions: deny` 是默认值，桥会尝试选「拒绝一次」。`allow` 优先选「允许一次」，缺少该项时选「始终允许」。权限决定可以在成员详情查看。
+- **权限**。`permissions: deny` 是默认值：桥会在代理提交权限请求时自动选「拒绝一次」，代理没有提供该选项时以取消结束。这是**自动拒绝**，不是逐次让你确认；需要逐次确认时，请从前台（Antigravity 窗口或 DeepSeek TUI）加入该成员。
+  - `permissions: allow` 会让桥自动批准代理提交的 ACP 权限请求，可能涉及执行 shell 命令和访问项目外的文件。桥不审查请求内容，只在代理给出的选项里按「允许一次 → 始终允许」的顺序选。实测 Antigravity 在 `accept-edits` 模式下读文件（`Get-Content`）和 `git diff` 仍会请求权限，这些请求都被自动放行。代理没有提供允许选项，或回合正在取消时，请求只能以取消结束。
+  - 选到「始终允许」时，代理可能记住这个决定，之后不再询问。`cwd` 只决定进程的启动目录，不限制代理能访问哪些文件；它实际能做什么，还取决于代理自身的配置和本机账号权限。
+  - 建议只在可信或可丢弃的项目里用 `allow`；不确定时保持 `deny`，并在成员详情的「最近权限决定」里查看被拒绝了什么。
 - **观察和停止**。在「办公室」点成员详情，可查看后台状态、最近输出、权限决定和重试时间。「停止后台」会结束当前回合和进程，之后可点「重启后台」恢复。任务栏的「停止」会取消正在处理该任务的后台回合。
 - **DeepSeek 账号**。内置 `acp` profile 默认走 `deepseek-official` API Key 路由。若使用已经登录的 Harness 账号，可以把本仓库的 [bridge.deepseek-acp.patch.yaml](../bridge.deepseek-acp.patch.yaml) 放到项目目录，并在 `args` 末尾追加 `--patch, bridge.deepseek-acp.patch.yaml`。这让该进程选择 `deepseek-account` 下的 `deepseek-flash`。 [DeepSeek 模型配置](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers)
 - **体检**。`ai-bridge doctor --project <目录>` 检查命令和安装版本。加 `--probe` 会读取 ACP 服务版本、会话能力和 HTTP MCP 支持，探针只发 `initialize`。
